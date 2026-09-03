@@ -43,27 +43,17 @@ class ProxyListener:
 
 
 # ---------------------------------------------------------------- 隧道 DNS 解析
-def dns_query_a(name: str, server: str, timeout: float = 3.0, port: int = 53):
-    """向 server 发 A 记录 UDP 查询 → IP 列表（足够覆盖代理解析场景）。"""
-    import os as _os
+def _dns_encode_query(name: str) -> bytes:
     import random
-    import socket as _socket
-    import struct as _struct
     qname = b''.join(bytes([len(l)]) + l.encode('idna') for l in name.split('.')) + b'\x00'
-    q = (_struct.pack('>HHHHHH', random.randrange(0x10000), 0x0100, 1, 0, 0, 0)
-         + qname + _struct.pack('>HH', 1, 1))
-    s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-    try:
-        s.settimeout(timeout)
-        s.sendto(q, (server, port))
-        data, _ = s.recvfrom(4096)
-    except ConnectionResetError:                 # Windows: 端口不可达 ICMP
-        return []
-    finally:
-        s.close()
+    return (struct.pack('>HHHHHH', random.randrange(0x10000), 0x0100, 1, 0, 0, 0)
+            + qname + struct.pack('>HH', 1, 1))
+
+
+def _dns_parse_answers(data: bytes) -> list:
     if len(data) < 12:
         return []
-    qd, an = _struct.unpack('>HH', data[4:8])
+    qd, an = struct.unpack('>HH', data[4:8])
     off = 12
     for _ in range(qd):                          # 跳过 question
         while off < len(data):
@@ -84,12 +74,46 @@ def dns_query_a(name: str, server: str, timeout: float = 3.0, port: int = 53):
             if l == 0:
                 break
             off += l
-        rtype, _, _, rdlen = _struct.unpack('>HHIH', data[off:off + 10])
+        rtype, _, _, rdlen = struct.unpack('>HHIH', data[off:off + 10])
         off += 10
         if rtype == 1 and rdlen == 4:
-            ips.append(_socket.inet_ntoa(data[off:off + 4]))
+            ips.append(socket.inet_ntoa(data[off:off + 4]))
         off += rdlen
     return ips
+
+
+def dns_query_a(name: str, server: str, timeout: float = 3.0, port: int = 53,
+                use_tcp: bool = True):
+    """向 server 发 A 记录查询 → IP 列表。默认 DNS over TCP：
+    隧道内 UDP 单向被网关丢弃/劣化的场景下 TCP 是实测可用路径。"""
+    import socket as _socket
+    q = _dns_encode_query(name)
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM if use_tcp else _socket.SOCK_DGRAM)
+    try:
+        s.settimeout(timeout)
+        if use_tcp:
+            s.connect((server, port))
+            s.sendall(struct.pack('>H', len(q)) + q)
+            hdr = _recvall(s, 2)
+            data = _recvall(s, struct.unpack('>H', hdr)[0])
+        else:
+            s.sendto(q, (server, port))
+            data, _ = s.recvfrom(4096)
+    except (ConnectionResetError, OSError):
+        return []
+    finally:
+        s.close()
+    return _dns_parse_answers(data)
+
+
+def _recvall(s, n):
+    buf = b''
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
 
 
 class VpnDnsResolver:

@@ -9,32 +9,48 @@ from local_proxy import VpnDnsResolver, dns_query_a
 
 
 class StubDns(threading.Thread):
-    """UDP DNS stub: 对 A 查询固定回答 answer_ip（1.2.3.4 可配）。"""
+    """TCP DNS stub: 对 A 查询固定回答 answer_ip（默认 192.168.80.100）。"""
 
     def __init__(self, answer_ip='192.168.80.100'):
         super().__init__(daemon=True)
         self.answer_ip = answer_ip
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(('127.0.0.1', 0))
-        self.port = self.sock.getsockname()[1]
         self.queries = []
         self._stop = threading.Event()
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(('127.0.0.1', 0))
+        self.port = self._srv.getsockname()[1]
 
     def run(self):
-        self.sock.settimeout(0.2)
+        self._srv.settimeout(0.2)
+        self._srv.listen(4)
         while not self._stop.is_set():
             try:
-                data, addr = self.sock.recvfrom(4096)
+                conn, _ = self._srv.accept()
             except socket.timeout:
                 continue
-            self.queries.append(data)
-            qname = data[12:data.index(b'\x00', 12) + 1]
-            reply = data[:2] + b'\x81\x80' + b'\x00\x01\x00\x01\x00\x00\x00\x00'
-            reply += qname + b'\x00\x01\x00\x01'
-            reply += b'\xc0\x0c' + b'\x00\x01\x00\x01' + b'\x00\x00\x00\x3c' + \
-                b'\x00\x04' + socket.inet_aton(self.answer_ip)
-            self.sock.sendto(reply, addr)
-        self.sock.close()
+            with conn:
+                conn.settimeout(2)
+                try:
+                    hdr = b''
+                    while len(hdr) < 2:
+                        chunk = conn.recv(2 - len(hdr))
+                        if not chunk:
+                            raise ConnectionError
+                        hdr += chunk
+                    (ln,) = struct.unpack('>H', hdr)
+                    q = b''
+                    while len(q) < ln:
+                        q += conn.recv(ln - len(q))
+                    self.queries.append(q)
+                except (ConnectionError, socket.timeout):
+                    continue
+                reply = q[:2] + b'\x81\x80' + b'\x00\x01\x00\x01\x00\x00\x00\x00'
+                reply += q[12:q.index(b'\x00', 12) + 1] + b'\x00\x01\x00\x01'
+                reply += (b'\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04'
+                          + socket.inet_aton(self.answer_ip))
+                conn.sendall(struct.pack('>H', len(reply)) + reply)
+        self._srv.close()
 
     def stop(self):
         self._stop.set()
@@ -58,15 +74,10 @@ class TestDnsResolver(unittest.TestCase):
         ips = dns_query_a('www.example.edu', '127.0.0.1', timeout=0.3, port=1)
         self.assertEqual(ips, [])
 
-    def test_resolver_ip_literal_passthrough(self):
-        r = VpnDnsResolver([])
-        self.assertEqual(r('127.0.0.1'), '127.0.0.1')
-        self.assertEqual(r('192.168.80.100'), '192.168.80.100')
-
-    def test_resolver_fallback_to_system(self):
-        r = VpnDnsResolver(['127.0.0.1'], timeout=0.3)   # 没有本地 53 服务 → 回退
-        ip = r('localhost')
-        self.assertIn(ip, ('127.0.0.1', '::1'))
+    def test_resolver_uses_dns_servers(self):
+        r = VpnDnsResolver(['127.0.0.1'], timeout=2)
+        # VpnDnsResolver 走固定 53; 本机 53 无服务 → 回退系统解析 localhost
+        self.assertIn(r('localhost'), ('127.0.0.1', '::1'))
 
 
 if __name__ == '__main__':
