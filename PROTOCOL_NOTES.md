@@ -462,6 +462,47 @@ devid.c `array_vpn_get_devid`：基于 `HKLM\SOFTWARE\Microsoft\Cryptography\Mac
 官方 = `HKLM\SOFTWARE\VPN\VPN2\VPNMachineGuid`（GUID 格式，注意与 Microsoft 的
 Cryptography\MachineGuid 不同）。
 
+## ⭐ 代理服务端实测发现（2026-09-04，proxy_serve.py）
+
+### Windows wintun 单播路由三坑（缺一不可）
+1. **0/0 下一跳不能写 VIP 自身**。`route add 0.0.0.0 mask 0.0.0.0 <VIP> if <idx>`
+   会被 Windows 规整为 on-link 路由 → 逐目的地 ARP，而 wintun 不应答 ARP →
+   表现为"首包偶发可出、其后单播全黑洞/传输失败"。改用**同网段假网关**
+   （网络地址+1，如 111.187.64.1）作为下一跳后 5/5 ping 通过。假网关 IP
+   不会真的出现在线上（帧由 wintun 只取 IP 部分）。
+2. **dadtransmits=0**（创建适配器后、配地址前执行
+   `netsh interface ipv4 set interface <name> dadtransmits=0`）：wintun 上
+   ARP 探测无法完成，地址会卡在 DAD 态 → 单播"传输失败。常见故障"
+   （wireguard-windows 同款处理）。
+3. **DNS 服务器 /32 排除路由**：0/0 进 TUN 后，本机 LAN 私有 DNS
+   （如 192.0.2.53）的查询也被路由进隧道而不可达 → 系统解析瘫痪。
+   需要把当前系统 DNS 逐个加 /32 固定走物理网关（与防环同族）。
+
+### 广播/组播过滤
+全隧道（include 0/0）下网关会把 VPN 段的所有广播/组播灌到每个客户端
+（实测 ~50 p/s 量级），宿主的 mDNS/SSDP/LLMNR 也会反向灌进隧道。Forwarder
+双向过滤（224/4、240/4、255.255.255.255）可显著减少无谓流量。
+
+### 校园边界对 VPN 池的单向 NAT（隧道 DNS 必开）
+公网解析 `www.tongji.edu.cn` → 202.120.189.175，但从 VPN 池访问时回包源
+是内网 192.168.80.100（DNAT 不回写源），与 socket 目的不符被本机内核丢弃。
+**必须用网关下发的 DNS（U JSON dns_servers）解析**，拿到内网地址
+192.168.80.100 直连则完全正常——官方客户端即此行为（DNSProxyType）。
+proxy_serve 默认开启（`vpn_dns_resolve: True`），由 VpnDnsResolver 实现
+（精简 UDP A 查询，失败回退系统解析）。
+
+### 网关侧频率限制实测（Round 6 结论复现）
+连续 ~2 小时高频 login/tunnel 会话（20+ 次）后，隧道数据面出现严重劣化：
+单包 RTT 从 <100ms 涨到 600-1200ms、TCP SYN 间歇丢失（客户端表现为
+连接超时/502），控制面正常。停止登录冷却后自愈。压测/部署须控制会话频率。
+
+### 目标侧状态备注
+202.120.190.208（campus DNS 服务器）的 TCP/80 在 2026-09-04 凌晨起对
+VPN 池返回 RST+ACK（TTL=60）、对公网直连超时——与客户端实现无关
+（同字节此前得到 SYN-ACK）。内网 web 为 192.168.80.100:80/443（可经隧道
+访问，GET / 返回 404 为服务端行为）。公网出口（1.1.1.1 等）对该 VIP 池
+不通（include=0/0 表示"都送进来"，出口放行与否由网关策略决定）。
+
 ## ⭐ ext1/hardwareid 完整算法（RE + frida 动态取证，2026-09-03 闭环验证）
 
 vpnhwidtool_x64.exe（rel_ag_9_4，hardwareid.cpp）`-motionpro` 模式，GetMacAuthInfo @RVA 0x81c0：
