@@ -30,12 +30,45 @@ def build_devid(seed: str) -> str:
     buf = (seed.encode('utf-8') + b'\x00' * 255)[:255]
     return base64.b64encode(hashlib.sha256(buf).digest()).decode().upper()
 
+
+def build_ext1() -> str:
+    """ext1（hardwareid 哈希）—— 官方算法，RE vpnhwidtool_x64.exe GetMacAuthInfo +
+    frida 动态取证 CryptHashData 确认：
+
+        ext1 = md5( "CPU=<cpuid>;OS=<winuuid>;HD=<hdd>;" )
+
+    采集源（官方经 WMI）：cpuid   = Win32_Processor.ProcessorId
+                        winuuid = '<major>-<minor>-<build>-' + Win32_ComputerSystemProduct.UUID
+                        hdd     = ',' + <硬盘序列号(字节对交换)> + '.'
+    本机已装官方客户端时直接读其注册表缓存（HKCU\\Software\\MotionPro\\L3VPN）；
+    否则返回 ''（实测服务端不校验 ext1，留空亦可登录）。
+    """
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\MotionPro\L3VPN')
+        try:
+            _, cpuid = winreg.QueryValueEx(k, 'cpuid')
+            _, winuuid = winreg.QueryValueEx(k, 'winuuid')
+            _, hdd = winreg.QueryValueEx(k, 'hdd')
+            return hashlib.md5(('CPU=%s;OS=%s;HD=%s;' % (cpuid, winuuid, hdd))
+                               .encode()).hexdigest()
+        finally:
+            winreg.CloseKey(k)
+    except OSError:
+        return ''
+
+
 if CFG.get('devid'):
     DEVICE_ID = CFG['devid']                    # 显式 devid（旧格式，保持原设备身份）
 elif CFG.get('devid_seed'):
     DEVICE_ID = build_devid(CFG['devid_seed'])  # seed → 程序生成
 else:
     sys.exit('config.py 缺少 devid_seed / devid ')
+
+if CFG.get('ext1') == 'auto':
+    EXT1 = build_ext1()
+else:
+    EXT1 = CFG.get('ext1', '')                  # '' 留空 / 手工指定 32hex
 
 HOST, PORT = CFG['server'], 443
 
@@ -378,7 +411,7 @@ def do_login(welcome=True):
             '&pwd=' + CFG['password'] +
             '&pwd1=&pwd2=&deviceid=' + devid_enc +
             '&device_name=' + CFG['device_name'] +
-            '&hardwareid=&ext1=' + CFG['ext1'] + '&ext2=')
+            '&hardwareid=&ext1=' + EXT1 + '&ext2=')
     conn.request('POST', '/prx/000/http/localhost/login', body.encode())
     if welcome:
         conn.request('GET', '/prx/000/http/localhost/an_welcome.js')

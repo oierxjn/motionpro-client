@@ -18,8 +18,7 @@ CFG = {
     'devid_seed':  'CHANGE_ME_任意稳定字符串',
     # 'devid':     '********…44 字符 base64…********',
     'device_name': 'DESKTOP-XXXXXXX',
-    # ext1（hardwareid 哈希）：
-    'ext1':        '',
+    'ext1':        'auto',
 
     # vpntunnel 请求头设备信息
     'clientid': 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX',   # 官方客户端用 VPNMachineGuid (GUID 格式)

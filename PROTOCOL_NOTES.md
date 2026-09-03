@@ -461,3 +461,38 @@ devid.c `array_vpn_get_devid`：基于 `HKLM\SOFTWARE\Microsoft\Cryptography\Mac
 ### clientid（vpntunnel 请求头）
 官方 = `HKLM\SOFTWARE\VPN\VPN2\VPNMachineGuid`（GUID 格式，注意与 Microsoft 的
 Cryptography\MachineGuid 不同）。
+
+## ⭐ ext1/hardwareid 完整算法（RE + frida 动态取证，2026-09-03 闭环验证）
+
+vpnhwidtool_x64.exe（rel_ag_9_4，hardwareid.cpp）`-motionpro` 模式，GetMacAuthInfo @RVA 0x81c0：
+
+```
+ext1        = md5( "CPU=<cpuid>;OS=<winuuid>;HD=<hdd>;" )          # = ClientID 第 1 段
+ClientDevID = md5( "CPU=<cpuid>;HD=<hdd>;GUID=<ArrayGuid>;" )      # 注册表 ClientDevID
+ClientID    = "<ext1>|<mac1;mac2;...;>|hostname=<hostname>"
+```
+
+原像实测（frida hook CalcDataMD5 @RVA 0x4b60 抓取，md5 与输出逐位核对）：
+```
+CPU=178BFBFF00A60F12;OS=6-3-26200-00000000-1111-2222-3333-444444444444;HD=,0000_0000_0000_0000.;
+CPU=178BFBFF00A60F12;HD=,0000_0000_0000_0000.;GUID=00000000-1111-2222-3333-444444444444;
+```
+
+字段采集（WMI）：
+- `CPU=` = `SELECT ProcessorId FROM Win32_Processor`（即注册表 cpuid）
+- `OS=`  = `<major>-<minor>-<build>-` + `SELECT UUID FROM Win32_ComputerSystemProduct`
+  （major/minor 来自 GetVersionExW 兼容值，Win11 上为 6.3；build 实测 26100→26200 会改变哈希）
+- `HD=`  = `,` + `<硬盘序列号>.`（WMI Win32_DiskDrive SerialNumber，多路采集 + 字节对交换转换；
+  多硬盘拼接方式未知——本机仅一块盘有序列号；注册表 hdd 值即此字段）
+- `GUID=`= ArrayGuid（首次运行 CoCreateGuid 生成，经 WMI StdRegProv 写入
+  `HKCU\SOFTWARE\Microsoft\Cryptography\ArrayGuid` —— 注意实际落盘 HKCU 而非代码里的 HKLM 常量）
+- MAC 列表 = GetAdaptersInfo（忽略蓝牙/PPP），`permanent MAC` 走 adapter IOCTL
+
+工程备注：
+- CalcDataMD5（CryptoAPI CALG_MD5）位于 RVA 0x4b60；调用点 0x140009617/0x140009627；
+  GetMacAuthInfo 函数体 0x1400081c0-0x140009c8d（.pdata 定位）。
+- 注册表调试开关姊妹键：`HKLM(...)\Software\...` 中值==0x2705 时打印两个哈希（同 EnablePrintRequest 家族）。
+- 工具不带参数运行会直接把全部采集值 + ClientID 打到 stdout。
+- **ext1 会随 Windows 大版本更新（build 号变化）而改变** —— 服务器把同一账号视为新设备但不影响登录。
+- 开源客户端实现：mp_client.py `build_ext1()`，config `'ext1': 'auto'` 优先读官方注册表缓存生成，
+  缺失时留空（服务端不校验，空值可登录，已实测）。
