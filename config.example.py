@@ -13,12 +13,13 @@ CFG = {
     'user':     'CHANGE_ME',
     'password': 'CHANGE_ME',
 
-    # 设备标识（登录表单与 vpntunnel 请求头）。
-    # devid: URL 编码前的 base64 形如 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='
-    # ext1:  官方客户端的 hardwareid（32 位 hex，实测可直接复用客户端生成的值）
-    'devid':       'CHANGE_ME',
+    # devid_seed: 任意稳定字符串即可。
+    # 如需保持官方客户端时期的设备身份：填入 'devid'（44 字符 base64）并删除 devid_seed。
+    'devid_seed':  'CHANGE_ME_任意稳定字符串',
+    # 'devid':     '********…44 字符 base64…********',
     'device_name': 'DESKTOP-XXXXXXX',
-    'ext1':        'CHANGE_ME',
+    # ext1（hardwareid 哈希）：
+    'ext1':        '',
 
     # vpntunnel 请求头设备信息
     'clientid': 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX',   # 官方客户端用 VPNMachineGuid (GUID 格式)

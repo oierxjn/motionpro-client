@@ -18,16 +18,14 @@ Array Networks **MotionPro VPN（AG 网关）** 的开源协议复现客户端�
 ## 依赖
 
 ```
-uv run mp_client.py        # 或
-pip install cryptography
+uv sync       
 ```
-
-仅依赖 `cryptography`。
 
 ## 使用
 
 ```powershell
-Copy-Item config.example.py config.py   # 然后编辑 config.py 填入账号与设备信息
+Copy-Item config.example.py config.py   # 然后编辑 config.py：填入账号与相关数据
+
 uv run mp_client.py
 ```
 

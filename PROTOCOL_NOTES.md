@@ -431,3 +431,33 @@ vl3vpn.dll 的 per-packet 日志由双条件控制：`DAT_1011ecc4 != 0 && logle
 - 会话租约：不 logout 会粘住同一 VIP；login→logout→login 后每次新 VIP（111.187.64.0/19 池）。
 - SSL_write(ssl, buf, 48) 的 Finished 需要 4 字节握手头 [20][00 00 0c]——自定义栈不做记录层组装。
 - write_to_vpn（sstp.c IP 分支）→ 管道 → 写线程 → vpn_tunnel_write（FUN_10063650）裸 SSL_write；vpn_tunnel_write 唯一调用链是 lwip/TUN 路径 FUN_10068d50 与 SSTP 中继路径。
+
+## 设备标识溯源（ext1 / devid / clientid）
+
+### ext1（登录表单 hardwareid 哈希）— RE: vl3vpn.dll devid.c array_vpn_get_hardwareid @10059a20
+1. 读 `HKCU\Software\MotionPro\L3VPN` 的 `ClientID`（REG_SZ）；缺失则运行安装目录
+   `vpnhwidtool_x64.exe -motionpro`（等 5s）后重读。结果写入 DAT_1011c4d8，登录表单填进 `ext1=`。
+2. ClientID 值格式（本机实测）：
+   `deadbeefdeadbeefdeadbeefdeadbeef|020055440001;020055440002;020055440003;|hostname=EXAMPLE-LAPTOP`
+   —— 第一段(32hex)即 ext1；第二段为网卡 MAC 列表（GetAdaptersInfo，忽略蓝牙/PPP）；
+   第三段 hostname。同键下还有：
+   - `ClientDevID` = 32hex；`cpuid` = 178BFBFF00A60F12（`SELECT ProcessorId FROM Win32_Processor`）
+   - `hdd` = `,0000_0000_0000_0000.`（硬盘序列号：IOCTL/SMART/WMI Win32_DiskDrive 多路采集，字节序变换）
+   - `winuuid` = `6-3-26100-<SMBIOS UUID>`（`SELECT UUID FROM Win32_ComputerSystemProduct`，SID 兜底）
+3. vpnhwidtool 用 Windows CryptoAPI `CalcDataMD5` 对采集数据做 MD5 得到 32hex。
+   简单排列组合（MAC/hdd/uuid/host/cpu/dev 1-5 元 + 常见分隔符）未命中原像——
+   采集值在拼接前还有内部变换（如硬盘序列号字节交换），精确原像需继续 RE vpnhwidtool。
+
+### ⭐ 服务端不校验 ext1（实测 2026-09-03）
+- 伪造 `ext1=<md5("not-a-real-hwid")>` → 登录成功拿到会话 ✓
+- `ext1=` 完全留空 → 登录成功 ✓
+- 开源客户端结论：**ext1 可留空**；如需与官方客户端共用设备身份，填其注册表 ClientID 第一段。
+
+### devid（deviceid 表单字段）
+devid.c `array_vpn_get_devid`：基于 `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` 等派生。
+开源实现：`devid = upper(base64(SHA256(seed[:255])))`，seed 任意稳定字符串（服务端仅做绑定比对，
+换 seed 即视为新设备）。
+
+### clientid（vpntunnel 请求头）
+官方 = `HKLM\SOFTWARE\VPN\VPN2\VPNMachineGuid`（GUID 格式，注意与 Microsoft 的
+Cryptography\MachineGuid 不同）。

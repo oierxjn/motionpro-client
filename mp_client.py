@@ -8,7 +8,7 @@ MotionPro (Array AG) VPN 开源客户端 — 全链路复现（控制面 + L3 �
 凭据与设备标识在 config.py（从 config.example.py 复制后填写）。
 协议细节见 PROTOCOL_NOTES.md。
 """
-import socket, os, struct, hashlib, hmac, uuid, sys, time
+import socket, os, struct, hashlib, hmac, uuid, sys, time, base64
 from cryptography.hazmat.primitives.asymmetric import padding as apad, x25519, ec, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography import x509
@@ -23,6 +23,19 @@ _sp = _iu.spec_from_file_location('mp_config', _cfgp)
 _mpmod = _iu.module_from_spec(_sp)
 _sp.loader.exec_module(_mpmod)
 CFG = _mpmod.CFG
+
+def build_devid(seed: str) -> str:
+    """devid = to_upper( base64( SHA256( seed[:255] ) ) )  (devid.c array_vpn_get_devid)
+    官方客户端以 255B 机器指纹为输入；服务端仅做设备绑定比对，任意稳定 seed 语义等价。"""
+    buf = (seed.encode('utf-8') + b'\x00' * 255)[:255]
+    return base64.b64encode(hashlib.sha256(buf).digest()).decode().upper()
+
+if CFG.get('devid'):
+    DEVICE_ID = CFG['devid']                    # 显式 devid（旧格式，保持原设备身份）
+elif CFG.get('devid_seed'):
+    DEVICE_ID = build_devid(CFG['devid_seed'])  # seed → 程序生成
+else:
+    sys.exit('config.py 缺少 devid_seed / devid ')
 
 HOST, PORT = CFG['server'], 443
 
@@ -360,7 +373,7 @@ def do_login(welcome=True):
     from proto_client import AgConnection
     conn = AgConnection(HOST)
     conn.request('GET', '/prx/000/http/localhost/an_login.js')
-    devid_enc = CFG['devid'].replace('+', '%2B').replace('/', '%2F').replace('=', '%3D')
+    devid_enc = DEVICE_ID.replace('+', '%2B').replace('/', '%2F').replace('=', '%3D')
     body = ('method=default_method_localdb&valid=validcode%3D&uname=' + CFG['user'] +
             '&pwd=' + CFG['password'] +
             '&pwd1=&pwd2=&deviceid=' + devid_enc +
