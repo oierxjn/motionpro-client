@@ -51,6 +51,16 @@ def find_wintun_dll(cfg_value: str = None) -> str | None:
     return None
 
 
+def _dec(b: bytes) -> str:
+    """子进程输出解码：先 utf-8 后 gbk（中文 Windows 的 netsh/ip 是本地码页）。"""
+    for enc in ('utf-8', 'gbk'):
+        try:
+            return b.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return b.decode('utf-8', 'replace')
+
+
 # ---------------------------------------------------------------- 抽象接口
 class TunDevice(ABC):
     name: str = 'mptun0'
@@ -171,10 +181,10 @@ class WintunTun(TunDevice):
 
     def _run_netsh(self, args: list):
         cmd = ['netsh'] + args
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True)
         if r.returncode != 0:
             raise OSError(r.returncode, 'netsh failed: %s %s' %
-                          (' '.join(cmd), (r.stderr or r.stdout).strip()))
+                          (' '.join(cmd), _dec(r.stderr or r.stdout or b'').strip()))
         log.debug('netsh ok: %s', ' '.join(cmd))
 
     def set_ip(self, ip: str, mask: str):
@@ -242,10 +252,10 @@ class LinuxTun(TunDevice):
 
     def _run_ip(self, args: list):
         cmd = ['ip'] + args
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True)
         if r.returncode != 0:
             raise OSError(r.returncode, 'ip failed: %s %s' %
-                          (' '.join(cmd), (r.stderr or r.stdout).strip()))
+                          (' '.join(cmd), _dec(r.stderr or r.stdout or b'').strip()))
 
     def set_ip(self, ip: str, mask: str):
         n = self.name
