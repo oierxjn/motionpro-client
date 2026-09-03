@@ -25,7 +25,7 @@ import sys
 import threading
 
 from forwarder import Forwarder
-from local_proxy import ProxyListener, ProxyServer
+from local_proxy import ProxyListener, ProxyServer, VpnDnsResolver
 from mp_client import CFG
 from routes import RouteManager
 from tun_dev import create_tun
@@ -75,6 +75,7 @@ class Supervisor:
         self.proxy = None
         self.state = None
         self.bind_ip = ''               # 上游绑定源 IP（split 模式自动=VIP）
+        self.resolver = None            # 隧道 DNS 解析器（重连后刷新）
         self._stop_evt = threading.Event()
         self._reconnect_evt = threading.Event()
 
@@ -94,6 +95,11 @@ class Supervisor:
             log.info('split 模式: 上游自动绑定 VIP %s', st.vip)
         else:
             self.bind_ip = str(self.cfg.get('proxy_bind_ip', '') or '')
+        if self.cfg.get('vpn_dns_resolve', True):
+            # 用隧道 DNS 解析域名: 校园边界对 VPN 池单向 NAT, 公网解析的
+            # 地址回包源不匹配; 网关自己的 DNS 给内网地址才能连通(官方同款)
+            self.resolver = VpnDnsResolver(st.dns)
+            log.info('域名解析走隧道 DNS %s', st.dns)
         self._start_forwarder(st)
         return st
 
@@ -112,7 +118,7 @@ class Supervisor:
                 self.rm.add_subnet_route(cidr, gw=st.vip,
                                          iface=ifindex if ifindex else alias)
         else:
-            self.rm.apply_full(self.vpn.host, st.vip,
+            self.rm.apply_full(self.vpn.host, st.vip, mask=st.mask,
                                tun_iface_alias=alias, tun_ifindex=ifindex)
 
     def _start_forwarder(self, st):
@@ -129,21 +135,26 @@ class Supervisor:
         self._reconnect_evt.set()
 
     # ---- asyncio 侧 ----
-    async def run(self):
-        """启动代理监听并驻留; 处理重连事件; finally 清理。"""
+    async def run(self, run_for: float = 0):
+        """启动代理监听并驻留; 处理重连事件; finally 清理。run_for>0 时定时自停。"""
         loop = asyncio.get_running_loop()
         if sys.platform != 'win32':                    # Linux: SIGTERM 优雅退出
             import signal
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, self.request_stop)
+        deadline = loop.time() + run_for if run_for else None
         self.proxy = ProxyServer(build_listeners(self.cfg),
-                                 bind_ip=self.bind_ip)
+                                 bind_ip=self.bind_ip,
+                                 resolver=self.resolver)
         await self.proxy.start()
         for host, port in self.proxy.endpoints:
             print('[*] 代理已就绪: %s:%d' % (host, port))
         try:
             while True:
                 if self._stop_evt.is_set():
+                    break
+                if deadline and loop.time() >= deadline:
+                    log.info('run_for 到时, 自动停止')
                     break
                 if self._reconnect_evt.is_set():
                     self._reconnect_evt.clear()
@@ -174,6 +185,8 @@ class Supervisor:
         self.state = self.vpn.reconnect()
         self.tun.set_ip(self.state.vip, self.state.mask)
         self._apply_routes(self.state)
+        if self.cfg.get('vpn_dns_resolve', True):
+            self.resolver = VpnDnsResolver(self.state.dns)
         self._start_forwarder(self.state)
 
     async def teardown(self):
@@ -207,6 +220,8 @@ def main():
                     help='仅验证隧道控制面（login→201→PQTU→mptoken→logout）')
     ap.add_argument('--route-dry-run', action='store_true',
                     help='路由命令只打印不执行（调试）')
+    ap.add_argument('--run-for', type=float, default=0, metavar='SECONDS',
+                    help='运行 N 秒后优雅自停（0=一直运行; 供测试/受控部署）')
     args = ap.parse_args()
 
     setup_logging(CFG.get('log_file', ''))
@@ -227,7 +242,7 @@ def main():
     print('[*] 隧道就绪 vip=%s/%s' % (sup.state.vip, sup.state.mask))
     try:
         # Ctrl+C → run() 的 finally 负责全部清理, asyncio.run 返回即清理完毕
-        asyncio.run(sup.run())
+        asyncio.run(sup.run(run_for=args.run_for))
     except KeyboardInterrupt:
         pass
 

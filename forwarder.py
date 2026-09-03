@@ -29,6 +29,12 @@ KA_MAX_MISS = 3
 RECV_TIMEOUT = 1.0          # 接收线程单次 recv 超时（也决定 stop 响应粒度）
 
 
+def _is_broadcast_or_multicast(pkt: bytes) -> bool:
+    """IPv4: 组播(224/4)+保留(240/4) 与受限广播不进隧道/TUN。
+    宿主的 mDNS/SSDP/LLMNR 风暴灌进 VPN 段既无意义也会招致网关侧丢包。"""
+    return len(pkt) >= 20 and (pkt[16] >= 224 or pkt[16:20] == b'\xff\xff\xff\xff')
+
+
 class FrameDemuxer:
     """把隧道 TLS 流上的 record 载荷切成 ('ctrl', class, raw) / ('ip', pkt) 事件。
 
@@ -85,11 +91,13 @@ class Forwarder:
     由装配层（proxy_serve）负责重连编排 —— 本类不自行重连。
     """
 
-    def __init__(self, transport, tun, keepalive_interval: int = 30, on_dead=None):
+    def __init__(self, transport, tun, keepalive_interval: int = 30, on_dead=None,
+                 filter_multicast: bool = True):
         self.transport = transport
         self.tun = tun
         self.keepalive_interval = keepalive_interval
         self.on_dead = on_dead
+        self.filter_multicast = filter_multicast
 
         self._stop = threading.Event()
         self._dead_fired = False
@@ -158,6 +166,9 @@ class Forwarder:
                 return
             for ev in self._demux.feed(data):
                 if ev[0] == 'ip':
+                    if self.filter_multicast and _is_broadcast_or_multicast(ev[1]):
+                        self.stats['dropped'] += 1
+                        continue
                     self.stats['rx_pkts'] += 1
                     try:
                         self.tun.write(ev[1])
@@ -184,6 +195,9 @@ class Forwarder:
                     self._fire_dead('tun %s' % e)
                 return
             if not pkt:
+                continue
+            if self.filter_multicast and _is_broadcast_or_multicast(pkt):
+                self.stats['dropped'] += 1
                 continue
             self.stats['tx_pkts'] += 1
             try:

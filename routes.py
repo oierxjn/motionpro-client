@@ -70,6 +70,19 @@ def parse_linux_default_gw(ip_route_output: str):
     return None
 
 
+def fake_gateway_ip(vip: str, mask: str) -> str:
+    """VIP 所在网段的网络地址+1，作为 0/0 的下一跳（假网关）。
+
+    Windows wintun 上下一跳不能写 VIP 自身（会被视为 on-link，触发逐目的地
+    ARP 而适配器无法应答 → 单播黑洞/首包后全丢，实测）；写同网段"假网关"
+    则内核一次性解析下一跳即可转发（实测 5/5 ping 通过）。该 IP 不会真的
+    出现在线上（帧的目的 MAC 是本适配器，wintun 只取其中的 IP 包）。"""
+    vipb = bytes(int(x) for x in vip.split('.'))
+    maskb = bytes(int(x) for x in mask.split('.'))
+    netb = bytes(a & b for a, b in zip(vipb, maskb))
+    return '.'.join(str(b) for b in netb[:3]) + '.' + str(netb[3] + 1)
+
+
 # ---------------------------------------------------------------- 管理器
 class RouteManager:
     def __init__(self, dry_run: bool = False, platform_name: str = None,
@@ -113,6 +126,27 @@ class RouteManager:
     # ---- 查询（只读, 不受 dry_run 影响） ----
     def resolve_ip(self, host: str) -> str:
         return self._resolver(host)
+
+    def system_dns_servers(self) -> list:
+        """当前系统 IPv4 DNS 服务器列表（去重, 去 loopback）。
+        这些服务器必须像网关一样加 /32 排除路由 —— 否则 0/0 切进 TUN 后
+        本机解析全会被路由进隧道而断网（LAN 私有 DNS 在隧道对端不可达）。"""
+        if self.platform == 'windows':
+            rc, out, _ = self._runner(['powershell', '-NoProfile', '-Command',
+                                       '(Get-DnsClientServerAddress -AddressFamily IPv4)'
+                                       '.ServerAddresses | Select-Object -Unique'])
+            ips = out.split()
+        else:
+            rc, out, _ = self._runner(['cat', '/etc/resolv.conf'])
+            ips = [ln.split()[1] for ln in out.splitlines()
+                   if ln.strip().startswith('nameserver ')]
+        seen, out_ips = set(), []
+        for ip in ips:
+            if ip.startswith('127.') or ip in seen:
+                continue
+            seen.add(ip)
+            out_ips.append(ip)
+        return out_ips
 
     def default_gateway(self):
         """当前物理默认路由 → (gw_ip, iface)；必须在添加隧道路由【之前】查询。"""
@@ -183,10 +217,11 @@ class RouteManager:
             undo = ['ip', 'route', 'del', cidr]
         self._exec(cmd, undo)
 
-    def apply_full(self, gw_host: str, vip: str, tun_iface_alias: str = None,
-                   tun_ifindex=None, tun_metric: int = 1):
+    def apply_full(self, gw_host: str, vip: str, mask: str = None,
+                   tun_iface_alias: str = None, tun_ifindex=None, tun_metric: int = 1):
         """全隧道装配（顺序敏感）:
-        1. 先取物理默认路由 → 2. 网关 IP /32 固定走物理网关（防环）→ 3. 0/0 走 TUN。
+        1. 先取物理默认路由 → 2. 防环: 网关 IP + 系统 DNS /32 固定走物理网关
+        → 3. 0/0 走 TUN（Windows 用假网关下一跳, 见 fake_gateway_ip）。
         Windows 需要 tun_ifindex(int)；Linux 用 tun_iface_alias(dev 名)。
         返回 (gw_ip, phy_gw, phy_iface) 供重连/日志使用。
         """
@@ -197,11 +232,15 @@ class RouteManager:
         log.info('apply_full: gw=%s via phy(%s, %s) → tun vip=%s',
                  gw_ip, phy_gw, phy_iface, vip)
         self.add_host_route(gw_ip, gw=phy_gw, iface=phy_iface, metric=1)
+        for dns in self.system_dns_servers():
+            log.info('DNS 排除路由: %s → 物理网卡', dns)
+            self.add_host_route(dns, gw=phy_gw, iface=phy_iface, metric=1)
         if self.platform == 'windows':
             if not tun_ifindex:
                 raise OSError('Windows 需要 TUN 接口索引(tun_ifindex)才能加 0/0 路由')
             self.set_interface_metric(tun_iface_alias, tun_metric)
-            self.add_default_route(gw=vip, iface=tun_ifindex, metric=tun_metric)
+            fake_gw = fake_gateway_ip(vip, mask) if mask else vip
+            self.add_default_route(gw=fake_gw, iface=tun_ifindex, metric=tun_metric)
         else:
             self.add_default_route(iface=tun_iface_alias, metric=tun_metric)
         return gw_ip, phy_gw, phy_iface

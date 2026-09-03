@@ -52,7 +52,8 @@ class FakeRunner:
 
 
 class TestRouteManager(unittest.TestCase):
-    RESOLVER = lambda self, host: '202.120.190.1'
+    PS_DNS = ('powershell -NoProfile -Command (Get-DnsClientServerAddress '
+              '-AddressFamily IPv4).ServerAddresses | Select-Object -Unique')
 
     def _rm(self, platform_name='windows', outputs=None):
         fr = FakeRunner(outputs)
@@ -60,9 +61,22 @@ class TestRouteManager(unittest.TestCase):
                           resolver=lambda host: '202.120.190.1')
         return rm, fr
 
+    def test_system_dns_servers_windows(self):
+        rm, fr = self._rm('windows', {self.PS_DNS: (
+            0, '192.0.2.53\n223.5.5.5\n192.0.2.53\n127.0.0.1\n218.85.157.99\n')})
+        self.assertEqual(rm.system_dns_servers(), ['192.0.2.53', '223.5.5.5', '218.85.157.99'])
+
+    def test_system_dns_servers_linux(self):
+        rm, fr = self._rm('linux', {'cat /etc/resolv.conf': (
+            0, 'nameserver 10.0.0.53\nnameserver 127.0.0.53\n# comment\n')})
+        self.assertEqual(rm.system_dns_servers(), ['10.0.0.53'])
+
     def test_windows_apply_full(self):
-        rm, fr = self._rm('windows', {'route print -4': (0, ROUTE_PRINT)})
+        outputs = {self.PS_DNS: (0, '192.0.2.53\n223.5.5.5\n'),
+                   'route print -4': (0, ROUTE_PRINT)}
+        rm, fr = self._rm('windows', outputs)
         gw_ip, phy_gw, phy_if = rm.apply_full('vpn.example.cn', '111.187.82.10',
+                                              mask='255.255.224.0',
                                               tun_iface_alias='mptun0', tun_ifindex=74)
         self.assertEqual(gw_ip, '202.120.190.1')
         self.assertEqual(phy_gw, '192.0.2.1')
@@ -71,26 +85,38 @@ class TestRouteManager(unittest.TestCase):
         # 防环: 网关 IP /32 走物理网关（iface 是 IP 字符串, 不追加 if）
         self.assertEqual(cmds[1],
                          'route add 202.120.190.1 mask 255.255.255.255 192.0.2.1 metric 1')
-        self.assertEqual(cmds[2],
-                         'netsh interface ipv4 set subinterface mptun0 metric=1 store=active')
-        # 0/0 走 TUN（需要 int ifindex）
+        # DNS 服务器排除路由（保住本机解析）; cmds[2] 是 DNS 查询命令
+        self.assertEqual(cmds[2], self.PS_DNS)
         self.assertEqual(cmds[3],
-                         'route add 0.0.0.0 mask 0.0.0.0 111.187.82.10 metric 1 if 74')
+                         'route add 192.0.2.53 mask 255.255.255.255 192.0.2.1 metric 1')
+        self.assertEqual(cmds[4],
+                         'route add 223.5.5.5 mask 255.255.255.255 192.0.2.1 metric 1')
+        self.assertEqual(cmds[5],
+                         'netsh interface ipv4 set subinterface mptun0 metric=1 store=active')
+        # 0/0 走 TUN, 下一跳 = 假网关(网络地址+1) = 111.187.64.1
+        self.assertEqual(cmds[6],
+                         'route add 0.0.0.0 mask 0.0.0.0 111.187.64.1 metric 1 if 74')
+        # 回滚应覆盖: 2×DNS + 网关 + 0/0 = 4 条 undo
+        self.assertEqual(len(rm._applied), 4)
 
     def test_windows_apply_full_requires_ifindex(self):
-        rm, _ = self._rm('windows', {'route print -4': (0, ROUTE_PRINT)})
+        rm, _ = self._rm('windows', {'route print -4': (0, ROUTE_PRINT),
+                                     self.PS_DNS: (0, '')})
         with self.assertRaises(OSError):
             rm.apply_full('vpn.example.cn', '111.187.82.10', tun_iface_alias='mptun0')
 
     def test_linux_apply_full(self):
-        rm, fr = self._rm('linux',
-                          {'ip route show default': (0, 'default via 10.0.0.1 dev eth0\n')})
+        rm, fr = self._rm('linux', {
+            'ip route show default': (0, 'default via 10.0.0.1 dev eth0\n'),
+            'cat /etc/resolv.conf': (0, 'nameserver 10.0.0.53\n')})
         gw_ip, phy_gw, phy_if = rm.apply_full('gw.example', '10.7.0.1', tun_iface_alias='mptun0')
         self.assertEqual((phy_gw, phy_if), ('10.0.0.1', 'eth0'))
         cmds = [' '.join(c) for c in fr.commands]
         self.assertEqual(cmds[0], 'ip route show default')
         self.assertEqual(cmds[1], 'ip route add 202.120.190.1/32 via 10.0.0.1 dev eth0')
-        self.assertEqual(cmds[2], 'ip route add default metric 1 dev mptun0')
+        self.assertEqual(cmds[2], 'cat /etc/resolv.conf')
+        self.assertEqual(cmds[3], 'ip route add 10.0.0.53/32 via 10.0.0.1 dev eth0')
+        self.assertEqual(cmds[4], 'ip route add default metric 1 dev mptun0')
 
     def test_rollback_reverses_order(self):
         rm, fr = self._rm('linux')

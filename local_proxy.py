@@ -19,6 +19,7 @@ import hmac
 import logging
 import socket
 import struct
+import time
 from dataclasses import dataclass
 
 log = logging.getLogger('proxy')
@@ -41,14 +42,103 @@ class ProxyListener:
         return bool(self.user)
 
 
-class ProxyServer:
-    """多监听代理组件：start()/stop() 由装配层调用。"""
+# ---------------------------------------------------------------- 隧道 DNS 解析
+def dns_query_a(name: str, server: str, timeout: float = 3.0, port: int = 53):
+    """向 server 发 A 记录 UDP 查询 → IP 列表（足够覆盖代理解析场景）。"""
+    import os as _os
+    import random
+    import socket as _socket
+    import struct as _struct
+    qname = b''.join(bytes([len(l)]) + l.encode('idna') for l in name.split('.')) + b'\x00'
+    q = (_struct.pack('>HHHHHH', random.randrange(0x10000), 0x0100, 1, 0, 0, 0)
+         + qname + _struct.pack('>HH', 1, 1))
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    try:
+        s.settimeout(timeout)
+        s.sendto(q, (server, port))
+        data, _ = s.recvfrom(4096)
+    except ConnectionResetError:                 # Windows: 端口不可达 ICMP
+        return []
+    finally:
+        s.close()
+    if len(data) < 12:
+        return []
+    qd, an = _struct.unpack('>HH', data[4:8])
+    off = 12
+    for _ in range(qd):                          # 跳过 question
+        while off < len(data):
+            l = data[off]
+            off += 1
+            if l == 0:
+                break
+            off += 0 if l & 0xC0 else l
+        off += 4
+    ips = []
+    for _ in range(an):
+        while off < len(data):
+            l = data[off]
+            off += 1
+            if l & 0xC0:
+                off += 1
+                break
+            if l == 0:
+                break
+            off += l
+        rtype, _, _, rdlen = _struct.unpack('>HHIH', data[off:off + 10])
+        off += 10
+        if rtype == 1 and rdlen == 4:
+            ips.append(_socket.inet_ntoa(data[off:off + 4]))
+        off += rdlen
+    return ips
 
-    def __init__(self, listeners: list, bind_ip: str = ''):
+
+class VpnDnsResolver:
+    """用隧道下发的 DNS 服务器解析域名（内网域名关键）；失败回退系统解析。
+
+    场景：校园边界对 VPN 池做了单向 NAT —— 公网解析出 202.120.189.175 而回包
+    来自 192.168.80.100，与 socket 目的不符被内核丢弃；用网关自己的 DNS 得到
+    内网地址直连则完全正常（官方客户端同款行为）。"""
+
+    def __init__(self, dns_servers: list, timeout: float = 3.0, ttl: float = 60):
+        self.dns_servers = [d for d in dns_servers if d]
+        self.timeout = timeout
+        self.ttl = ttl
+        self._cache: dict = {}
+
+    def __call__(self, host: str) -> str:
+        import ipaddress
+        try:                                     # IP 字面量直接放行
+            ipaddress.ip_address(host)
+            return host
+        except ValueError:
+            pass
+        now = time.time()
+        hit = self._cache.get(host)
+        if hit and hit[1] > now:
+            return hit[0]
+        for server in self.dns_servers:
+            try:
+                ips = dns_query_a(host, server, self.timeout)
+            except OSError:
+                continue
+            if ips:
+                self._cache[host] = (ips[0], now + self.ttl)
+                return ips[0]
+        return socket.gethostbyname(host)        # 回退系统解析
+
+
+class ProxyServer:
+    """多监听代理组件：start()/stop() 由装配层调用。
+
+    resolver: 可选 callable(host) -> ip。提供时所有域名先经它解析
+    （例如用隧道内网 DNS，正确解析内网域名）；缺省用系统解析。"""
+
+    def __init__(self, listeners: list, bind_ip: str = '', resolver=None):
         if isinstance(listeners, ProxyListener):
             listeners = [listeners]
         self.listeners = listeners
         self.bind_ip = bind_ip          # 上游连接源地址（空 = 跟随路由表）
+        self.resolver = resolver
         self._servers: list[asyncio.AbstractServer] = []
         self._handlers: set[asyncio.Task] = set()
 
@@ -103,9 +193,21 @@ class ProxyServer:
             writer.close()
 
     # ---- 上游 ----
+    def _resolve_sync(self, host: str) -> str:
+        if self.resolver is None:
+            return host
+        try:
+            ip = self.resolver(host)
+            return ip or host
+        except Exception:
+            return host
+
     async def _connect(self, host: str, port: int):
-        """→ (reader, writer)；bind_ip 绑定源地址（空 = 跟随路由表）。"""
+        """→ (reader, writer)；域名先经 resolver（如配置），bind_ip 绑定源地址。"""
         local = (self.bind_ip, 0) if self.bind_ip else None
+        if self.resolver is not None:
+            ip = await asyncio.to_thread(self._resolve_sync, host)
+            host = ip
         return await asyncio.wait_for(
             asyncio.open_connection(host, port, local_addr=local), timeout=15)
 
@@ -204,8 +306,8 @@ class ProxyServer:
             return
         try:
             up_r, up_w = await self._connect(host, port)
-        except Exception:
-            log.debug('upstream refused: %s:%d', host, port)
+        except Exception as e:
+            log.info('upstream connect failed: %s:%d (%s)', host, port, e)
             self._socks_reply(w, REP_REFUSED)
             return
         log.info('socks5 %s:%d connected', host, port)

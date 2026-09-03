@@ -189,6 +189,10 @@ class WintunTun(TunDevice):
 
     def set_ip(self, ip: str, mask: str):
         n = self.alias or self.name
+        # 关闭 DAD —— wintun 是 L3 适配器, ARP 探测无法完成, 地址会一直
+        # 处于 Probe/Duplicate 态导致单播 "传输失败"(wireguard-windows 同款处理)
+        self._run_netsh(['interface', 'ipv4', 'set', 'interface', n,
+                         'dadtransmits=0', 'store=active'])
         self._run_netsh(['interface', 'ip', 'set', 'address', 'name=' + n,
                          'static', ip, mask])
         self._run_netsh(['interface', 'ipv4', 'set', 'subinterface', n,
