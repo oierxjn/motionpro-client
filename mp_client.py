@@ -124,14 +124,15 @@ def prf(secret, label, seed, nbytes, h='sha256'):
     return out[:nbytes]
 
 class ExactTLS:
-    def __init__(self):
+    def __init__(self, host=None, port=None):
+        # 默认沿用 config.py 的网关；vpn_service 可注入其他 host 便于测试
         hs = HELLO_BYTES[5:]               # 剥掉外层 record 头，只留 handshake 消息
         self.hello = hs[:6] + os.urandom(32) + hs[38:]   # 换新 random（hs头4B+版本2B后）
         self.hs_sent = self.hello
         self.hs_recv = b''
         self.cr = self.hello[6:38]
         self.sr = b''
-        self.sock = socket.create_connection((HOST, PORT), timeout=15)
+        self.sock = socket.create_connection((host or HOST, port or PORT), timeout=15)
         self.cipher = None
         self.ckey = self.skey = self.cmac = self.smac = None
         self.csalt = self.ssalt = None
@@ -419,80 +420,18 @@ def do_login(welcome=True):
     return conn, sess
 
 def main():
-    import time
-    # 1) 先登录一次并立刻 logout, 清掉服务器上陈旧的 VIP 租约
-    conn0, sess0 = do_login()
-    conn0.request('GET', '/prx/000/http/localhost/logout')
-    print('stale session cleared')
-    conn0.close() if hasattr(conn0, 'close') else None
-    time.sleep(2)
-    # 2) 重新登录 (仅 login, welcome 留给隧道连接, 与 vpnd 一致)
-    conn, sess = do_login(welcome=False)
-    print('cookie ok')
-
-    t = ExactTLS()
-    t.handshake()
-    # vpnd 顺序: 同一连接先 an_welcome.js 再 vpntunnel
-    t.send_app(b'GET /prx/000/http/localhost/an_welcome.js HTTP/1.1\r\n'
-               b'Host: ' + HOST.encode() +
-               b'\r\nCookie: ANStandalone=true;ANsession5301755367574550=' +
-               sess.encode() + b'\r\n\r\n')
-    whdr = t.read_until(b'\r\n\r\n', 10)
-    print('welcome status:', whdr.split(b'\r\n')[0].decode())
-    # 读掉 welcome body (Content-Length)
-    import re as _re2
-    mcl = _re2.search(rb'Content-Length: (\d+)', whdr)
-    if mcl:
-        t.read_exact(int(mcl.group(1)), 8)
-    req = ('GET /prx/000/http/localhost/vpntunnel HTTP/1.1\r\nHost: %s\r\n' % HOST +
-           'Cookie: ANStandalone=true;ANsession5301755367574550=' + sess + '\r\n'
-           'x-devtype: 1\r\nappid: SSPVPN\r\n'
-           'clientid: ' + CFG['clientid'] + '\r\n'
-           'cpuid: ' + CFG['cpuid'] + '\r\nhostname: ' + CFG['hostname'] +
-           '\r\nPAYLOAD-IP-VERSION: 6\r\n\r\n')
-    t.send_app(req.encode())
-    hdr = t.read_until(b'\r\n\r\n', 10)
-    print('tunnel status:', hdr.split(b'\r\n')[0].decode())
-    print('hdr rest:', hdr[-200:])
-    # T 消息逐字节对齐真实客户端 (get_config.c:1579):
-    # [16:20]=0(无旧vip) [20:24]=首个适配器IP [24:28]=0(新会话非重连) [40:46]=网卡 MAC
-    tmsg = bytearray(48)
-    tmsg[0] = 0x54; tmsg[12:16] = struct.pack('<I', 0x20)
-    tmsg[20:24] = bytes(int(x) for x in CFG['ras_ip'].split('.'))
-    tmsg[24:28] = struct.pack('<I', 0)
-    tmsg[40:46] = bytes.fromhex(CFG['mac'])
-    t.send_app(bytes([0x50]) + bytes(15))
-    head = t.read_exact(16, 10)
-    print('P-resp head: %s' % head.hex())
-    dlen = int.from_bytes(head[12:16], 'little'); got = t.read_exact(dlen, 10)
-    print('Q config %d B: %s' % (len(got), got[:80].hex()))
-    t.send_app(bytes(tmsg))
-    head = t.read_exact(16, 10)
-    print('T-resp head: %s' % head.hex())
-    dlen = int.from_bytes(head[12:16], 'little'); got = t.read_exact(dlen, 10)
-    import json as J
-    netj = J.loads(got.rstrip(b'\x00'))
-    print('U config:', J.dumps(netj, ensure_ascii=False, indent=1))
-    vip = netj['client_ipv4']
-    print('vip raw:', repr(vip))
-    if isinstance(vip, str) and '.' in vip:
-        vipb = bytes(int(x) for x in vip.split('.'))
-        vipi = int.from_bytes(vipb, 'big')
-    else:
-        vipi = int(vip)
-        vipb = ip4(vipi)
+    # 隧道建立流程已固化到 VpnService（vpn_service.py）；本 main() 保留原探测演示
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    from vpn_service import VpnService
+    svc = VpnService()
+    st = svc.connect()
+    t = st.tls
+    vip = st.vip
+    vipb = bytes(int(x) for x in vip.split('.'))
+    vipi = int.from_bytes(vipb, 'big')
     print('vip LE:', '.'.join(str(b) for b in vipb), ' BE:', '.'.join(str(b) for b in vipb[::-1]))
-    # 真实客户端 speed tunnel disabled 时不发 class-4; 直接 class-6
-    # class-6 token
-    t.send_app(ctrl(6))
-    r = recv_frame(t, 3)
-    print('mptoken reply:', (r.hex() if r else 'NONE'))
-    tok = 0
-    if r and b'mptoken' in r:
-        import re as _re
-        m = _re.search(rb'"mptoken"\s*:\s*"?(\d+)', r)
-        if m: tok = int(m.group(1))
-    print('token:', tok)
+    print('token:', st.mptoken)
 
     def udp_cksum(src, dst, uh):
         full = src + dst + b'\x00\x11' + struct.pack('>H', len(uh)) + uh + b'\x00\x00'
@@ -576,8 +515,7 @@ def main():
     print('TOTAL IN:', total, 'B', '=> DATA PLANE ' + ('ALIVE!' if total else 'silent'))
     t.sock.close()
     # 正常登出, 释放 VIP 租约
-    conn.request('GET', '/prx/000/http/localhost/logout')
-    print('logged out')
+    svc.shutdown()
 
 if __name__ == '__main__':
     main()
