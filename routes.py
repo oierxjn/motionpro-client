@@ -110,16 +110,16 @@ class RouteManager:
             return self._run_dry(cmd, undo)
         return self._run(cmd, undo)
 
-    # ---- 查询 ----
+    # ---- 查询（只读, 不受 dry_run 影响） ----
     def resolve_ip(self, host: str) -> str:
         return self._resolver(host)
 
     def default_gateway(self):
         """当前物理默认路由 → (gw_ip, iface)；必须在添加隧道路由【之前】查询。"""
         if self.platform == 'windows':
-            rc, out, _ = self._exec(['route', 'print', '-4'])
+            rc, out, _ = self._runner(['route', 'print', '-4'])
             return parse_win_default_gw(out)
-        rc, out, _ = self._exec(['ip', 'route', 'show', 'default'])
+        rc, out, _ = self._runner(['ip', 'route', 'show', 'default'])
         gw, dev = parse_linux_default_gw(out) or (None, None)
         return gw, dev
 

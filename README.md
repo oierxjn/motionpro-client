@@ -10,6 +10,12 @@ Array Networks **MotionPro VPN（AG 网关）** 的开源协议复现客户端�
 | 文件 | 说明 |
 |---|---|
 | `mp_client.py` | 主客户端：自研 TLS1.2（vpnd 指纹）+ 控制面 + L3 裸 IP 数据面 |
+| `vpn_service.py` | `VpnService`：隧道会话服务类（connect/reconnect/shutdown） |
+| `proxy_serve.py` | **代理服务端入口**：SOCKS5/HTTP 代理 → TUN → VPN 隧道 |
+| `local_proxy.py` | 内建 asyncio 代理组件（SOCKS5 RFC1928 + HTTP/CONNECT，可独立运行/替换） |
+| `forwarder.py` | 隧道 ↔ TUN 双线程 IP 包搬运 + keepalive + 帧解复用（`FrameDemuxer`） |
+| `tun_dev.py` | TUN 设备封装（Windows wintun / Linux /dev/net/tun 双实现） |
+| `routes.py` | 路由装配：防环（网关 IP 固定走物理网卡）+ 0/0 或分段路由 + 回滚 |
 | `proto_client.py` | 登录 HTTP 连接封装（AgConnection） |
 | `ppp.py` | PPP 状态机（本地 SSTP/RAS 模式用，L3 直连不需要） |
 | `config.example.py` | 配置模板 → 复制为 `config.py` 填写（**含凭据，勿提交**） |
@@ -21,7 +27,7 @@ Array Networks **MotionPro VPN（AG 网关）** 的开源协议复现客户端�
 uv sync       
 ```
 
-## 使用
+## 使用：客户端演示
 
 ```powershell
 Copy-Item config.example.py config.py   # 然后编辑 config.py：填入账号与相关数据
@@ -32,6 +38,44 @@ uv run mp_client.py
 运行后依次输出：stale session cleared → welcome/tunnel 201 → Q/U 配置 JSON → mptoken →
 发出 DNS/ICMP/TCP 探测并打印收到的回包（DNS 查询 `www.tongji.edu.cn` 应收到网关内网解析应答），
 最后 logout。
+
+## 使用：代理服务端（局域网设备免装 VPN 客户端）
+
+把本机变成 SOCKS5/HTTP 代理：其他设备设置代理后，流量经 VPN 隧道进入校园网
+（源 IP = 网关分配的虚拟 IP 111.187.x.x）。
+
+```powershell
+# 1) 获取 wintun.dll（管理员 PowerShell，仅 Windows 首次需要）
+uv run scripts/fetch_wintun.py
+
+# 2) config.py 填好凭据与代理段（proxy_socks/proxy_http/proxy_user/proxy_pass）
+
+# 3) 管理员运行
+uv run proxy_serve.py
+```
+
+- **防环**：启动时先把网关 IP 加 /32 路由固定走物理网卡，再把 0/0 指向 TUN
+  （这是"不做必死"项，RouteManager 已内置顺序与回滚）。
+- 验证：
+  ```powershell
+  curl.exe --socks5-hostname mp:mp123456@127.0.0.1:1080 https://www.tongji.edu.cn -I
+  curl.exe -x http://mp:mp123456@127.0.0.1:8080 http://www.tongji.edu.cn -I
+  ```
+- 断线自动重连（keepalive 3 周期无回显/EOF 触发，指数退避最多 5 次）；
+  Ctrl+C 优雅退出（回滚路由 → 关 TUN → logout 释放 VIP 租约）。
+- 仅验证隧道控制面：`uv run proxy_serve.py --check-only`；路由调试：`--route-dry-run`。
+
+### 模块解耦约定
+
+每个组件只依赖显式接口，可标准化替换/打桩调试：
+
+| 组件 | 接口 | 替换方式 |
+|---|---|---|
+| 隧道传输 | `send_app(bytes)` / `recv_app()` | `TunnelState.tls` 传任意同形实现 |
+| TUN | `TunDevice.open/read/write/set_ip/close` | `create_tun(kind)` / 自定义类 |
+| 路由 | `RouteManager.apply_full/rollback` | runner/resolver 可注入, `dry_run` 可调试 |
+| 搬运 | `Forwarder(transport, tun, on_dead)` | 帧解析 `FrameDemuxer` 纯函数可单测 |
+| 代理 | `ProxyServer.start/stop` | 可换 pproxy/sing-box（出口走本机路由即可） |
 
 ## 协议要点（详见 PROTOCOL_NOTES.md）
 

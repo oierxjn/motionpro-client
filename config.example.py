@@ -28,4 +28,29 @@ CFG = {
     # T 消息（0x54）本机信息：首个网络适配器 IPv4 与其 MAC（无冒号 hex）
     'ras_ip': '192.168.1.100',
     'mac':    'aabbccddeeff',
+
+    # ============ 代理服务端（proxy_serve.py）============
+    # 监听地址: 'host:port'，置空字符串/None 可停用该监听
+    'proxy_socks':    '0.0.0.0:1080',
+    'proxy_http':     '0.0.0.0:8080',
+    # 开放监听（非 127.0.0.1）必须配置认证，否则拒绝启动
+    'proxy_user':     'CHANGE_ME',
+    'proxy_pass':     'CHANGE_ME',
+
+    # TUN 设备（Windows wintun / Linux /dev/net/tun）
+    'tun_name':       'mptun0',
+    'tun_mtu':        1400,
+    'tun_kind':       '',            # ''=按平台自动; 'wintun'|'linux'
+    'wintun_dll':     '',            # wintun.dll 路径（空=自动搜索 vendor/，先跑 scripts/fetch_wintun.py）
+
+    # 路由: 'full'=全隧道(0/0) | 'split'=仅 route_include 网段进隧道
+    'route_mode':     'full',
+    'route_include':  [],            # split 模式示例: ['202.120.190.0/24']
+    'route_dry_run':  False,         # True=路由命令只打印不执行（调试）
+
+    # 上游连接绑定源 IP（如 VIP）；空=跟随系统路由表
+    'proxy_bind_ip':  '',
+
+    # 日志文件（空=仅控制台输出）
+    'log_file':       '',
 }
