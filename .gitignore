@@ -1,0 +1,29 @@
+# ============ 凭据（含真实账号密码/设备标识，禁止提交） ============
+# 从 config.example.py 复制后填写，只存在于本地
+config.py
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ============ 逆向/研究临时工件 ============
+temp/
+tmp/
+vendor/
+*.bin
+*.p12
+*.pfx
+
+# ============ 运行日志 ============
+*.log
+logs/
