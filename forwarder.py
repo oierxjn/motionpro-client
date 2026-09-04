@@ -35,6 +35,14 @@ def _is_broadcast_or_multicast(pkt: bytes) -> bool:
     return len(pkt) >= 20 and (pkt[16] >= 224 or pkt[16:20] == b'\xff\xff\xff\xff')
 
 
+def broadcast_of(vip: str, mask: str) -> str:
+    """VIP/掩码 → 子网定向广播地址（111.187.79.15/19 → 111.187.95.255）。"""
+    vipb = bytes(int(x) for x in vip.split('.'))
+    maskb = bytes(int(x) for x in mask.split('.'))
+    b = bytes(a | (255 ^ m) for a, m in zip(vipb, maskb))
+    return '.'.join(str(x) for x in b)
+
+
 class FrameDemuxer:
     """把隧道 TLS 流上的 record 载荷切成 ('ctrl', class, raw) / ('ip', pkt) 事件。
 
@@ -92,13 +100,18 @@ class Forwarder:
     """
 
     def __init__(self, transport, tun, keepalive_interval: int = 30, on_dead=None,
-                 filter_multicast: bool = True):
+                 filter_multicast: bool = True, local_broadcast: str = None):
         self.transport = transport
         self.tun = tun
         self.keepalive_interval = keepalive_interval
         self.on_dead = on_dead
         self.filter_multicast = filter_multicast
-
+        # 子网定向广播(如 111.187.95.255)。广播过滤必须含它: 网关会把段内
+        # 广播按客户端复制灌下来(dst=子网广播), 宿主 NetBIOS/mDNS 逐包应答
+        # 又灌回隧道 —— 放大回路会招致网关限流, 单播数据面被劣化(实测)。
+        self.local_broadcast = (
+            bytes(int(x) for x in local_broadcast.split('.'))
+            if local_broadcast else None)
         self._stop = threading.Event()
         self._dead_fired = False
         self._dead_lock = threading.Lock()
@@ -108,6 +121,15 @@ class Forwarder:
         self._threads: list[threading.Thread] = []
         self.stats = {'tx_pkts': 0, 'rx_pkts': 0, 'rx_ctrl': 0,
                       'ka_sent': 0, 'ka_echo': 0, 'dropped': 0}
+
+    def _should_drop(self, pkt: bytes) -> bool:
+        if not self.filter_multicast:
+            return False
+        if _is_broadcast_or_multicast(pkt):
+            return True
+        if self.local_broadcast and len(pkt) >= 20 and pkt[16:20] == self.local_broadcast:
+            return True
+        return False
 
     # ---- 生命周期 ----
     def start(self):
@@ -166,7 +188,7 @@ class Forwarder:
                 return
             for ev in self._demux.feed(data):
                 if ev[0] == 'ip':
-                    if self.filter_multicast and _is_broadcast_or_multicast(ev[1]):
+                    if self._should_drop(ev[1]):
                         self.stats['dropped'] += 1
                         continue
                     self.stats['rx_pkts'] += 1
@@ -196,7 +218,7 @@ class Forwarder:
                 return
             if not pkt:
                 continue
-            if self.filter_multicast and _is_broadcast_or_multicast(pkt):
+            if self._should_drop(pkt):
                 self.stats['dropped'] += 1
                 continue
             self.stats['tx_pkts'] += 1

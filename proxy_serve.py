@@ -24,10 +24,10 @@ import logging
 import sys
 import threading
 
-from forwarder import Forwarder
+from forwarder import Forwarder, broadcast_of
 from local_proxy import ProxyListener, ProxyServer, VpnDnsResolver
 from mp_client import CFG
-from routes import RouteManager
+from routes import RouteManager, fake_gateway_ip
 from tun_dev import create_tun
 from vpn_service import VpnService
 
@@ -88,6 +88,9 @@ class Supervisor:
         self.tun.open(self.cfg.get('tun_name', 'mptun0'),
                       int(self.cfg.get('tun_mtu', 1400)))
         self.tun.set_ip(st.vip, st.mask)
+        if hasattr(self.tun, 'add_static_neighbor'):
+            # 0/0 下一跳(假网关)挂永久 ARP 条目, 否则内核 ARP 无应答 → 单播黑洞
+            self.tun.add_static_neighbor(fake_gateway_ip(st.vip, st.mask))
         self._apply_routes(st)
         if self.cfg.get('route_mode', 'full') == 'split' and not self.cfg.get('proxy_bind_ip'):
             # split 模式下出口流量必须以 VIP 为源才能命中分段路由
@@ -128,7 +131,8 @@ class Supervisor:
             self.fwd.stop()
         self.fwd = Forwarder(st.tls, self.tun,
                              keepalive_interval=st.keepalive_interval,
-                             on_dead=self._on_dead)
+                             on_dead=self._on_dead,
+                             local_broadcast=broadcast_of(st.vip, st.mask))
         self.fwd.start()
 
     # ---- Forwarder 回调（来自搬运线程） ----
@@ -186,6 +190,8 @@ class Supervisor:
         self.rm.rollback()
         self.state = self.vpn.reconnect()
         self.tun.set_ip(self.state.vip, self.state.mask)
+        if hasattr(self.tun, 'add_static_neighbor'):
+            self.tun.add_static_neighbor(fake_gateway_ip(self.state.vip, self.state.mask))
         self._apply_routes(self.state)
         if self.cfg.get('vpn_dns_resolve', True):
             self.resolver = VpnDnsResolver(self.state.dns)

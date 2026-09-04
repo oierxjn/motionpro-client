@@ -199,6 +199,24 @@ class WintunTun(TunDevice):
                          'mtu=%d' % self.mtu, 'store=active'])
         log.info('tun %s set ip %s/%s', n, ip, mask)
 
+    NEIGHBOR_MAC = '02-4D-50-54-55-4E'      # 合成本地管理单播 MAC(wintun 不校验)
+
+    def add_static_neighbor(self, ip: str):
+        """给假网关 IP 挂永久静态邻居(ARP 表项)。
+
+        wintun 不应答 ARP: 0/0 经假网关转发时内核会 ARP 探测下一跳,
+        无应答则单播黑洞(仅广播能出)。静态"永久"条目让下一跳永远可达。
+        MAC 值随意(wintun 只取帧中 IP), 但 netsh 要求大写虚线格式。
+        条目随适配器删除而消失, 无需清理。"""
+        n = self.alias or self.name
+        try:                                     # 条目不存在时 netsh 返回非零, 属正常
+            self._run_netsh(['interface', 'ipv4', 'delete', 'neighbors', n, ip])
+        except OSError:
+            pass
+        self._run_netsh(['interface', 'ipv4', 'add', 'neighbors', n, ip,
+                         self.NEIGHBOR_MAC])
+        log.info('tun %s static neighbor %s -> %s', n, ip, self.NEIGHBOR_MAC)
+
     def read(self, n: int = 65536, timeout: float = None) -> bytes:
         import ctypes
         ms = self.INFINITE if timeout is None else max(0, int(timeout * 1000))

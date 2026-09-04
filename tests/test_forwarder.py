@@ -185,5 +185,65 @@ class TestForwarder(unittest.TestCase):
         self.assertIn('keepalive', self.dead_why[0])
 
 
+class TestForwarderSubnetBroadcast(unittest.TestCase):
+    """子网定向广播双向过滤（防'网关灌广播→宿主应答→灌回'放大回路）。"""
+
+    def _start(self, bcast):
+        self.tr = MockTransport()
+        self.tun = MockTun()
+        self.fwd = Forwarder(self.tr, self.tun, keepalive_interval=30,
+                             local_broadcast=bcast)
+        self.fwd.start()
+
+    def _stop(self):
+        self.fwd.stop()
+
+    def _subnet_bcast(self):
+        # src=1.2.3.4 dst=111.187.95.255 的"子网定向广播"(UDP)
+        ih = struct.pack('>BBHHHBBH', 0x45, 0, 28, 1, 0, 64, 17, 0)
+        ih += b'\x01\x02\x03\x04' + bytes([111, 187, 95, 255])
+        return ih + b'\x00' * 8
+
+    def test_uplink_subnet_broadcast_dropped(self):
+        self._start('111.187.95.255')
+        try:
+            self.tun.inject(self._subnet_bcast())
+            for _ in range(50):
+                if self.fwd.stats['dropped']:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(self.tr.sent, [])
+            self.assertGreater(self.fwd.stats['dropped'], 0)
+        finally:
+            self._stop()
+
+    def test_downlink_subnet_broadcast_not_written(self):
+        self._start('111.187.95.255')
+        try:
+            self.tr.inbox.put(self._subnet_bcast())
+            p = ip4_pkt()
+            self.tr.inbox.put(p)
+            for _ in range(50):
+                if self.tun.written:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(self.tun.written, [p])    # 只有正常 IP 包写入
+        finally:
+            self._stop()
+
+    def test_unicast_still_forwarded_with_filter_on(self):
+        self._start('111.187.95.255')
+        try:
+            p = ip4_pkt()
+            self.tr.inbox.put(p)
+            for _ in range(50):
+                if self.tun.written:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(self.tun.written, [p])
+        finally:
+            self._stop()
+
+
 if __name__ == '__main__':
     unittest.main()
