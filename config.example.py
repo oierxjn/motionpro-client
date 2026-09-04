@@ -53,6 +53,7 @@ CFG = {
 
     # 域名走隧道 DNS 解析（内网域名必须; 公网域名走网关出口也更一致）
     'vpn_dns_resolve': True,
+    'vpn_dns_timeout': 8,          # 隧道 DNS 单次查询超时(秒)
 
     # 日志文件（空=仅控制台输出）
     'log_file':       '',

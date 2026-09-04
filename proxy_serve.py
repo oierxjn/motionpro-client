@@ -98,8 +98,10 @@ class Supervisor:
         if self.cfg.get('vpn_dns_resolve', True):
             # 用隧道 DNS 解析域名: 校园边界对 VPN 池单向 NAT, 公网解析的
             # 地址回包源不匹配; 网关自己的 DNS 给内网地址才能连通(官方同款)
-            self.resolver = VpnDnsResolver(st.dns)
-            log.info('域名解析走隧道 DNS %s', st.dns)
+            self.resolver = VpnDnsResolver(st.dns,
+                                           timeout=float(self.cfg.get('vpn_dns_timeout', 8)))
+            log.info('域名解析走隧道 DNS %s (timeout=%ss)',
+                     st.dns, self.cfg.get('vpn_dns_timeout', 8))
         self._start_forwarder(st)
         return st
 

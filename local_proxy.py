@@ -123,7 +123,8 @@ class VpnDnsResolver:
     来自 192.168.80.100，与 socket 目的不符被内核丢弃；用网关自己的 DNS 得到
     内网地址直连则完全正常（官方客户端同款行为）。"""
 
-    def __init__(self, dns_servers: list, timeout: float = 3.0, ttl: float = 60):
+    def __init__(self, dns_servers: list, timeout: float = 8.0, ttl: float = 60):
+        # timeout 需覆盖 TCP 建连+查询双 RTT; 隧道高负载时单 RTT 可达 1-3s
         self.dns_servers = [d for d in dns_servers if d]
         self.timeout = timeout
         self.ttl = ttl
