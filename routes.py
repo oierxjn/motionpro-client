@@ -70,6 +70,12 @@ def parse_linux_default_gw(ip_route_output: str):
     return None
 
 
+def parse_linux_addr(ip_addr_output: str, iface: str):
+    """`ip -4 addr show dev <iface>` 输出 → 首个 IPv4 地址（不带前缀长度）。"""
+    m = re.search(r'^\s*inet\s+(\d{1,3}(?:\.\d{1,3}){3})', ip_addr_output, re.M)
+    return m.group(1) if m else None
+
+
 def fake_gateway_ip(vip: str, mask: str) -> str:
     """VIP 所在网段的网络地址+1，作为 0/0 的下一跳（假网关）。
 
@@ -244,6 +250,52 @@ class RouteManager:
         else:
             self.add_default_route(iface=tun_iface_alias, metric=tun_metric)
         return gw_ip, phy_gw, phy_iface
+
+    # ---- 容器 netns 模式 ----
+    def primary_addr(self, iface: str) -> str:
+        """容器主网卡的首个 IPv4 地址（DNAT 进入连接的本地源地址）。"""
+        rc, out, _ = self._runner(['ip', '-4', 'addr', 'show', 'dev', iface])
+        addr = parse_linux_addr(out, iface)
+        if not addr:
+            raise OSError('无法获取 %s 的 IPv4 地址' % iface)
+        return addr
+
+    def add_source_rule_route(self, src_ip: str, gw: str, iface: str, table: int = 100):
+        """源地址策略路由：from <src_ip> → 独立表走主网卡。
+
+        容器全隧道模式的关键配套：DNAT 进入的代理客户端连接，其 socket
+        源地址固定为容器主网卡 IP；没有这条规则，回包会被 netns 内
+        0/0(mptun0) 默认路由吸进 VPN，代理对外不可用。"""
+        self._exec(['ip', 'route', 'add', 'default', 'via', gw, 'dev', iface,
+                    'table', str(table)],
+                   undo=['ip', 'route', 'del', 'default', 'table', str(table)])
+        self._exec(['ip', 'rule', 'add', 'pref', '100', 'from', src_ip,
+                    'lookup', str(table)],
+                   undo=['ip', 'rule', 'del', 'pref', '100', 'from', src_ip,
+                         'lookup', str(table)])
+
+    def apply_container_full(self, gw_host: str, vip: str,
+                             tun_iface_alias: str = 'mptun0', tun_metric: int = 1):
+        """容器 netns 内的全隧道装配（宿主路由表零改动）。
+
+        与宿主 full 模式的本质区别：0/0 只作用于容器 netns；再用源地址
+        策略路由把「DNAT 进来的代理客户端回包」（源=容器 eth0 IP）钉在
+        主网卡上。上游代理 socket 必须绑定 VIP 为源（proxy_serve 已做），
+        两类流量按源地址天然分流，无需 connmark。"""
+        gw_ip = self.resolve_ip(gw_host)
+        container_gw, container_iface = self.default_gateway()
+        if not container_gw and not container_iface:
+            raise OSError('容器内未找到默认路由（docker 网桥）')
+        container_ip = self.primary_addr(container_iface)
+        log.info('apply_container_full: gw=%s container(%s, %s, %s) → tun=%s',
+                 gw_ip, container_ip, container_gw, container_iface, tun_iface_alias)
+        self.add_host_route(gw_ip, gw=container_gw, iface=container_iface, metric=1)
+        for dns in self.system_dns_servers():
+            log.info('DNS 排除路由: %s → 容器主网卡', dns)
+            self.add_host_route(dns, gw=container_gw, iface=container_iface, metric=1)
+        self.add_default_route(iface=tun_iface_alias, metric=tun_metric)
+        self.add_source_rule_route(container_ip, container_gw, container_iface)
+        return gw_ip, container_gw, container_ip
 
     def rollback(self):
         """倒序回滚全部已添加路由（幂等: 单条失败只告警，继续清理其余）。"""

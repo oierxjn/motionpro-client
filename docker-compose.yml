@@ -1,0 +1,22 @@
+# MotionPro 代理服务端（容器 netns 隔离部署）
+#
+# 前置: 宿主需有 /dev/net/tun；config.py 与 docker-compose.yml 同目录。
+# 端口只发布到 Tailscale IP（按需修改），避免暴露在物理网卡上。
+services:
+  motionpro-proxy:
+    build: .
+    image: motionpro-proxy:latest
+    container_name: motionpro-proxy
+    restart: unless-stopped
+    devices:
+      - "/dev/net/tun:/dev/net/tun"
+    cap_add:
+      - NET_ADMIN            # TUN 创建 + 容器内路由装配（netns 本地, 不碰宿主）
+    ports:
+      - "100.100.129.3:1080:1080"   # SOCKS5  ← 绑定 Tailscale IP
+      - "100.100.129.3:8080:8080"   # HTTP
+    volumes:
+      - ./config.py:/app/config.py:ro
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }

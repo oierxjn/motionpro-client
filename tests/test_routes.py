@@ -150,5 +150,54 @@ class TestRouteManager(unittest.TestCase):
         self.assertEqual(len(rm._applied), 0)
 
 
+class TestContainerMode(unittest.TestCase):
+    """容器 netns 全隧道: 0/0 只进容器 TUN, 回包按源地址钉在主网卡。"""
+
+    def _rm(self):
+        fr = FakeRunner({
+            'ip route show default': (0, 'default via 172.18.0.1 dev eth0\n'),
+            'ip -4 addr show dev eth0': (0, '2: eth0: <UP>\n    inet 172.18.0.2/16 brd 172.18.255.255 scope global eth0\n'),
+            'cat /etc/resolv.conf': (0, 'nameserver 127.0.0.11\noptions edns0\n'),  # docker 内嵌 DNS → 127 被跳过
+        })
+        rm = RouteManager(platform_name='linux', runner=fr,
+                          resolver=lambda h: '202.120.190.1')
+        return rm, fr
+
+    def test_apply_container_full_sequence(self):
+        rm, fr = self._rm()
+        gw_ip, cgw, cip = rm.apply_container_full('vpn.example.cn', '111.187.82.10',
+                                                  tun_iface_alias='mptun0')
+        self.assertEqual(gw_ip, '202.120.190.1')
+        self.assertEqual((cgw, cip), ('172.18.0.1', '172.18.0.2'))
+        cmds = [' '.join(c) for c in fr.commands]
+        # 1) 防环: AG 网关 /32 走容器主网卡（cmds[2] 是 DNS 查询命令）
+        self.assertEqual(cmds[3],
+                         'ip route add 202.120.190.1/32 via 172.18.0.1 dev eth0')
+        # 2) 0/0 → 容器内 TUN (netns 本地, 不碰宿主)
+        self.assertEqual(cmds[4], 'ip route add default metric 1 dev mptun0')
+        # 3) 源地址分流: 容器 IP 回包 → 独立表走主网卡
+        self.assertEqual(cmds[5],
+                         'ip route add default via 172.18.0.1 dev eth0 table 100')
+        self.assertEqual(cmds[6], 'ip rule add pref 100 from 172.18.0.2 lookup 100')
+
+    def test_container_rollback_reverses(self):
+        rm, fr = self._rm()
+        rm.apply_container_full('vpn.example.cn', '111.187.82.10')
+        rm.rollback()
+        dels = [' '.join(c) for c in fr.commands[-4:]]
+        self.assertEqual(dels, [
+            'ip rule del pref 100 from 172.18.0.2 lookup 100',
+            'ip route del default table 100',
+            'ip route del default metric 1',
+            'ip route del 202.120.190.1/32',
+        ])
+
+    def test_container_dns_127_skipped(self):
+        rm, fr = self._rm()
+        rm.apply_container_full('vpn.example.cn', '111.187.82.10')
+        adds = [' '.join(c) for c in fr.commands]
+        self.assertFalse(any('127.0.0.11/32' in c for c in adds))
+
+
 if __name__ == '__main__':
     unittest.main()

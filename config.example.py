@@ -48,6 +48,11 @@ CFG = {
     'route_include':  [],            # split 模式示例: ['202.120.190.0/24']
     'route_dry_run':  False,         # True=路由命令只打印不执行（调试）
 
+    # 部署模式: 'host'=宿主直跑(会改宿主路由表, 多服务主机慎用)
+    #          'container'=Docker 容器内跑(netns 隔离, 0/0 只作用于容器,
+    #                      源地址分流保证代理回包走容器主网卡)
+    'deploy_mode':    'host',
+
     # 上游连接绑定源 IP（如 VIP）；空=跟随系统路由表
     'proxy_bind_ip':  '',
 

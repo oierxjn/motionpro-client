@@ -92,10 +92,12 @@ class Supervisor:
             # 0/0 下一跳(假网关)挂永久 ARP 条目, 否则内核 ARP 无应答 → 单播黑洞
             self.tun.add_static_neighbor(fake_gateway_ip(st.vip, st.mask))
         self._apply_routes(st)
-        if self.cfg.get('route_mode', 'full') == 'split' and not self.cfg.get('proxy_bind_ip'):
-            # split 模式下出口流量必须以 VIP 为源才能命中分段路由
+        if self.cfg.get('route_mode', 'full') == 'split' or \
+                self.cfg.get('deploy_mode', 'host') == 'container':
+            # split: 出口流量必须以 VIP 为源才能命中分段路由;
+            # container: 上游绑定 VIP 为源, 与容器 eth0 IP 的回包按源地址分流
             self.bind_ip = st.vip
-            log.info('split 模式: 上游自动绑定 VIP %s', st.vip)
+            log.info('上游自动绑定 VIP %s', st.vip)
         else:
             self.bind_ip = str(self.cfg.get('proxy_bind_ip', '') or '')
         if self.cfg.get('vpn_dns_resolve', True):
@@ -111,6 +113,7 @@ class Supervisor:
     def _apply_routes(self, st):
         alias = getattr(self.tun, 'alias', None) or self.tun.name
         ifindex = getattr(self.tun, 'ifindex', None)
+        deploy_mode = self.cfg.get('deploy_mode', 'host')
         if self.cfg.get('route_mode', 'full') == 'split':
             # 防环仍然必做: 网关 IP 固定走物理网卡
             gw_ip = self.rm.resolve_ip(self.vpn.host)
@@ -122,6 +125,10 @@ class Supervisor:
                 log.info('split route: %s → tun', cidr)
                 self.rm.add_subnet_route(cidr, gw=st.vip,
                                          iface=ifindex if ifindex else alias)
+        elif deploy_mode == 'container':
+            # 容器 netns 全隧道: 0/0 只作用于容器内, 源地址分流保回包
+            self.rm.apply_container_full(self.vpn.host, st.vip,
+                                         tun_iface_alias=alias)
         else:
             self.rm.apply_full(self.vpn.host, st.vip, mask=st.mask,
                                tun_iface_alias=alias, tun_ifindex=ifindex)
