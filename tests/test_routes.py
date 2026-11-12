@@ -170,8 +170,8 @@ class TestContainerMode(unittest.TestCase):
         self.assertEqual(gw_ip, '202.120.190.1')
         self.assertEqual((cgw, cip), ('172.18.0.1', '172.18.0.2'))
         cmds = [' '.join(c) for c in fr.commands]
-        # 1) 防环: AG 网关 /32 走容器主网卡（cmds[2] 是 DNS 查询命令）
-        self.assertEqual(cmds[3],
+        # 1) 防环: AG 网关 /32 走容器主网卡（容器内无可用 DNS 排除项, cmds[3] 是 DNS 查询）
+        self.assertEqual(cmds[2],
                          'ip route add 202.120.190.1/32 via 172.18.0.1 dev eth0')
         # 2) 0/0 → 容器内 TUN (netns 本地, 不碰宿主)
         self.assertEqual(cmds[4], 'ip route add default metric 1 dev mptun0')
