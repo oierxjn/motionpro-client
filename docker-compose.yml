@@ -12,9 +12,12 @@ services:
       - "/dev/net/tun:/dev/net/tun"
     cap_add:
       - NET_ADMIN            # TUN 创建 + 容器内路由装配（netns 本地, 不碰宿主）
+    # 容器内显式 DNS: 宿主 resolv.conf 若指向 Tailscale MagicDNS(100.100.100.100),
+    # 其上游对部分域名(如 vpn.tongji.cn)返回空答案, 会导致容器无法解析网关
+    dns: [223.5.5.5, 119.29.29.29]
     ports:
-      - "100.100.129.3:1080:1080"   # SOCKS5  ← 绑定 Tailscale IP
-      - "100.100.129.3:8080:8080"   # HTTP
+      - "100.100.129.3:1080:1080"    # SOCKS5 ← 绑定 Tailscale IP（宿主 8080 被 casaos 占用, HTTP 换 18081）
+      - "100.100.129.3:18081:8080"   # HTTP
     volumes:
       - ./config.py:/app/config.py:ro
     logging:

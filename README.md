@@ -83,6 +83,26 @@ uv run proxy_serve.py
   192.168.80.100:80）；部分端口（内网 :443、公网出口）能否使用取决于网关
   与目标策略，与本客户端无关。
 
+### 容器部署（多服务主机推荐）
+
+在跑着其他服务的主机上用容器隔离部署——TUN/路由/0/0 全部作用于容器 netns，
+**宿主路由表零改动**（对外服务/其他容器/Tailscale 均无感知）：
+
+```bash
+mkdir -p ~/motionpro-deploy && cd ~/motionpro-deploy
+# 放入 config.py（从 config.example.py 复制, 设 'deploy_mode': 'container'）
+#   与 docker-compose.yml（端口按需改绑, 默认只发布到 Tailscale IP）
+curl -LO https://raw.githubusercontent.com/oierxjn/motionpro-client/main/Dockerfile
+docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+docker compose up -d && docker logs -f motionpro-proxy
+```
+
+原理：容器内 `default metric 1 dev mptun0` 只作用于容器 netns；「DNAT 进入的
+代理客户端回包」（源=容器 eth0 IP）由源地址策略路由（`ip rule from <eth0_ip>
+lookup 100`）钉在 docker 网关上，与绑定 VIP 为源的上游流量天然分流。
+注意：宿主 resolv.conf 若指向 Tailscale MagicDNS（100.100.100.100），其对部分
+域名可能返回空答案，compose 已给容器显式配公共 DNS。
+
 ### 模块解耦约定
 
 每个组件只依赖显式接口，可标准化替换/打桩调试：

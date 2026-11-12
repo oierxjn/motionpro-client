@@ -4,10 +4,12 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# 仅 cryptography 一个运行时依赖; 国内构建可传
-# --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# 运行时依赖: cryptography + iproute2(tun_dev 用 ip 命令配 TUN/路由)
 ARG PIP_INDEX_URL=https://pypi.org/simple
-RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} "cryptography>=50.0.1"
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} "cryptography>=50.0.1" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY mp_client.py proto_client.py vpn_service.py forwarder.py \
      tun_dev.py routes.py local_proxy.py proxy_serve.py \
