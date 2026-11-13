@@ -44,5 +44,30 @@ class TestHelpers(unittest.TestCase):
             self.assertTrue(hasattr(TunDevice, m))
 
 
+class TestLinuxTunClose(unittest.TestCase):
+    """LinuxTun.close 必须先 ip link del: 仅 close fd 时, 阻塞在 os.read()
+    的搬运线程会占住设备, 下次 TUNSETIFF 同名设备 EBUSY (重连回路根因)。"""
+
+    def _tun(self, calls):
+        t = LinuxTun()
+        t._run_ip = lambda args: calls.append(args)
+        t.fd = None                       # 不触碰真实 fd
+        return t
+
+    def test_close_deletes_interface(self):
+        calls = []
+        self._tun(calls).close()
+        self.assertEqual(calls, [['link', 'del', 'dev', 'mptun0']])
+
+    def test_close_swallows_missing_interface(self):
+        t = LinuxTun()
+
+        def _boom(args):
+            raise OSError(2, 'No such device')
+        t._run_ip = _boom
+        t.fd = None
+        t.close()                         # 接口不存在时不抛出
+
+
 if __name__ == '__main__':
     unittest.main()

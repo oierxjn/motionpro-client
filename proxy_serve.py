@@ -128,7 +128,19 @@ class Supervisor:
         except Exception as e:
             self.last_error = '%s: %s' % (type(e).__name__, e)
             self.phase = 'idle'
+            log.exception('隧道建立失败: %s (回滚残留状态)', e)
+            self._cleanup_failed_bring_up()
             raise
+
+    def _cleanup_failed_bring_up(self):
+        """建隧道中途失败后尽力恢复一致状态（路由/TUN/网关会话/引用）。
+
+        不清理的话面板重试会踩到残留：半开 TUN、已存在的路由、面板快照
+        显示陈旧 VIP。清理失败只告警，不覆盖原始异常。"""
+        try:
+            self._tunnel_down_sync()
+        except Exception as e:
+            log.warning('失败清理未完全(忽略): %s', e)
 
     def _apply_routes(self, st):
         alias = getattr(self.tun, 'alias', None) or self.tun.name
@@ -248,6 +260,9 @@ class Supervisor:
         if self.fwd:
             self.fwd.stop()
             self.fwd = None
+        # 拆除即升代: 旧 forwarder 之后迟到的死亡回调一律拒绝——
+        # 即使新 forwarder 尚未启动（bring_up 失败停在半路）也不会误触发重连
+        self._fwd_gen = getattr(self, '_fwd_gen', 0) + 1
         self.rm.rollback()
         if self.tun:
             self.tun.close()

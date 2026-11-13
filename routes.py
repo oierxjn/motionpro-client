@@ -180,7 +180,8 @@ class RouteManager:
             if isinstance(iface, int):
                 cmd += ['if', str(iface)]
         else:
-            cmd = ['ip', 'route', 'add', '%s/32' % ip]
+            # replace 而非 add: 失败重试时若残留同条路由, add 会 "File exists" 中断装配
+            cmd = ['ip', 'route', 'replace', '%s/32' % ip]
             if gw:
                 cmd += ['via', gw]
             if iface:
@@ -196,7 +197,7 @@ class RouteManager:
             if iface is not None:
                 cmd += ['if', str(iface)]
         else:
-            cmd = ['ip', 'route', 'add', 'default', 'metric', str(metric)]
+            cmd = ['ip', 'route', 'replace', 'default', 'metric', str(metric)]
             if gw:
                 cmd += ['via', gw]
             if iface:
@@ -215,7 +216,7 @@ class RouteManager:
             if iface is not None:
                 cmd += ['if', str(iface)]
         else:
-            cmd = ['ip', 'route', 'add', cidr, 'metric', str(metric)]
+            cmd = ['ip', 'route', 'replace', cidr, 'metric', str(metric)]
             if gw:
                 cmd += ['via', gw]
             if iface:
@@ -266,7 +267,7 @@ class RouteManager:
         容器全隧道模式的关键配套：DNAT 进入的代理客户端连接，其 socket
         源地址固定为容器主网卡 IP；没有这条规则，回包会被 netns 内
         0/0(mptun0) 默认路由吸进 VPN，代理对外不可用。"""
-        self._exec(['ip', 'route', 'add', 'default', 'via', gw, 'dev', iface,
+        self._exec(['ip', 'route', 'replace', 'default', 'via', gw, 'dev', iface,
                     'table', str(table)],
                    undo=['ip', 'route', 'del', 'default', 'table', str(table)])
         self._exec(['ip', 'rule', 'add', 'pref', '100', 'from', src_ip,

@@ -258,6 +258,8 @@ class LinuxTun(TunDevice):
 
     def __init__(self):
         self.fd = None
+        self.name = 'mptun0'
+        self.mtu = 1400
         self.ifindex = None
 
     def open(self, name: str = 'mptun0', mtu: int = 1400):
@@ -293,6 +295,13 @@ class LinuxTun(TunDevice):
         return os.write(self.fd, pkt)
 
     def close(self):
+        # 先删接口再关 fd: 仅 close fd 时, 若仍有线程阻塞在 os.read(fd) 上
+        # (搬运线程无超时阻塞读), 内核在该读返回前不会销毁设备, 下次
+        # TUNSETIFF 同名设备会 EBUSY。ip link del 强制销毁并立即唤醒阻塞读。
+        try:
+            self._run_ip(['link', 'del', 'dev', self.name])
+        except OSError as e:
+            log.debug('ip link del %s: %s (接口不存在属正常)', self.name, e)
         if self.fd:
             try:
                 os.close(self.fd)

@@ -2,6 +2,7 @@
 """web_panel 单测：LogRing 环形缓冲 + panel_auth 认证规则 + Supervisor 快照。"""
 import logging
 import unittest
+from types import SimpleNamespace
 
 from web_panel import LogRing, attach_ring, panel_auth
 
@@ -84,6 +85,29 @@ class TestSupervisorSnapshot(unittest.TestCase):
         self.assertEqual(sup.phase, 'idle')
         self.assertNotEqual(sup.last_error, '')
 
+    def test_bring_up_failure_cleans_partial_setup(self):
+        """bring_up 中途失败: 残留被清理（TUN 关闭/state 清空），
+        否则面板重试踩到半开 TUN/陈旧 VIP（DebianServer EBUSY 回路根因）。"""
+        from proxy_serve import Supervisor
+        sup = Supervisor({'server': 'x.example', 'user': 'u', 'password': 'p'})
+        closed = []
+        st = SimpleNamespace(vip='10.7.0.1', mask='255.255.255.0', dns=[],
+                             keepalive_interval=30, mptoken=1, tls=None)
+        sup.vpn = SimpleNamespace(connect=lambda: st, shutdown=lambda: None)
+        sup.tun = SimpleNamespace(set_ip=lambda ip, m: None,
+                                  close=lambda: closed.append(1))
+
+        def _boom(_st):
+            raise RuntimeError('route boom')
+        sup._apply_routes = _boom
+        with self.assertRaises(RuntimeError):
+            sup.bring_up_tunnel()
+        self.assertEqual(sup.phase, 'idle')
+        self.assertIn('route boom', sup.last_error)
+        self.assertEqual(closed, [1])           # TUN 已关闭
+        self.assertIsNone(sup.tun)
+        self.assertIsNone(sup.state)            # 快照不再显示陈旧 VIP
+
 
 class TestOnDeadGeneration(unittest.TestCase):
     """迟到回调世代守卫: 被拆除隧道的旧 Forwarder 不得触发新隧道重连。"""
@@ -108,3 +132,16 @@ class TestOnDeadGeneration(unittest.TestCase):
         sup = self._sup()                            # 未启动过 forwarder → gen 0
         sup._on_dead('EOF')                          # gen 缺省 0
         self.assertTrue(sup._reconnect_evt.is_set())
+
+    def test_teardown_bumps_generation(self):
+        """拆隧道即升代: 新 forwarder 启动前（bring_up 半路失败）的死亡回调也被拒绝。"""
+        sup = self._sup()
+        sup._fwd_gen = 3
+        sup.fwd = None
+        sup.tun = None
+        sup.rm = SimpleNamespace(rollback=lambda: None)
+        sup.vpn = SimpleNamespace(shutdown=lambda: None)
+        sup._tunnel_down_sync()
+        self.assertEqual(sup._fwd_gen, 4)
+        sup._on_dead('late EBADF', gen=3)            # 旧世代
+        self.assertFalse(sup._reconnect_evt.is_set())

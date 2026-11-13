@@ -113,10 +113,10 @@ class TestRouteManager(unittest.TestCase):
         self.assertEqual((phy_gw, phy_if), ('10.0.0.1', 'eth0'))
         cmds = [' '.join(c) for c in fr.commands]
         self.assertEqual(cmds[0], 'ip route show default')
-        self.assertEqual(cmds[1], 'ip route add 202.120.190.1/32 via 10.0.0.1 dev eth0')
+        self.assertEqual(cmds[1], 'ip route replace 202.120.190.1/32 via 10.0.0.1 dev eth0')
         self.assertEqual(cmds[2], 'cat /etc/resolv.conf')
-        self.assertEqual(cmds[3], 'ip route add 10.0.0.53/32 via 10.0.0.1 dev eth0')
-        self.assertEqual(cmds[4], 'ip route add default metric 1 dev mptun0')
+        self.assertEqual(cmds[3], 'ip route replace 10.0.0.53/32 via 10.0.0.1 dev eth0')
+        self.assertEqual(cmds[4], 'ip route replace default metric 1 dev mptun0')
 
     def test_rollback_reverses_order(self):
         rm, fr = self._rm('linux')
@@ -172,12 +172,12 @@ class TestContainerMode(unittest.TestCase):
         cmds = [' '.join(c) for c in fr.commands]
         # 1) 防环: AG 网关 /32 走容器主网卡（容器内无可用 DNS 排除项, cmds[3] 是 DNS 查询）
         self.assertEqual(cmds[2],
-                         'ip route add 202.120.190.1/32 via 172.18.0.1 dev eth0')
-        # 2) 0/0 → 容器内 TUN (netns 本地, 不碰宿主)
-        self.assertEqual(cmds[4], 'ip route add default metric 1 dev mptun0')
+                         'ip route replace 202.120.190.1/32 via 172.18.0.1 dev eth0')
+        # 2) 0/0 → 容器内 TUN (netns 本地, 不碰宿主; replace 幂等, 失败重试可重复装配)
+        self.assertEqual(cmds[4], 'ip route replace default metric 1 dev mptun0')
         # 3) 源地址分流: 容器 IP 回包 → 独立表走主网卡
         self.assertEqual(cmds[5],
-                         'ip route add default via 172.18.0.1 dev eth0 table 100')
+                         'ip route replace default via 172.18.0.1 dev eth0 table 100')
         self.assertEqual(cmds[6], 'ip rule add pref 100 from 172.18.0.2 lookup 100')
 
     def test_container_rollback_reverses(self):
