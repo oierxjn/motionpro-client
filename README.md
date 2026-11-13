@@ -89,11 +89,13 @@ uv run proxy_serve.py
 在跑着其他服务的主机上用容器隔离部署——TUN/路由全部作用于容器 netns，
 **宿主路由表零改动**（对外服务/其他容器/Tailscale 均无感知）。
 
-前置：宿主有 `/dev/net/tun`（内核 tun 模块，通常默认）、`git` 与 Docker
-（含 compose 插件）。Debian/Ubuntu 缺什么装什么：
+前置：宿主有 `/dev/net/tun`（内核 tun 模块，通常默认）、`git` 与 Docker。
+注意 Debian/Ubuntu **系统源**的 `docker.io` 不含 `docker compose` v2 子命令
+（`apt install docker-compose` 装的是旧版 v1），需 Docker 官方源：
 
 ```bash
-apt-get update && apt-get install -y git docker.io docker-compose
+apt-get update && apt-get install -y git curl
+curl -fsSL https://get.docker.com | sh     # 官方源 docker-ce + compose 插件
 ```
 
 ```bash
@@ -102,25 +104,46 @@ git clone https://github.com/oierxjn/motionpro-client.git
 cd motionpro-client
 
 # 2) 写配置（含凭据，.gitignore 已排除、不会被提交）
-cp config.example.py config.py && vim config.py
-#   最少修改这几项：
+cp config.example.py config.py
+#   交互式：vim config.py，最少修改：
 #     'user' / 'password'          登录凭据
-#     'devid_seed'                 换成任意稳定字符串
+#     'devid_seed'                 稳定且可区分设备的字符串（如含主机名）；
+#                                  同账号多台机器务必不同，否则网关视为
+#                                  同一设备，可能互相顶下线
 #     'deploy_mode': 'container'   容器模式（关键）
-#     'proxy_user' / 'proxy_pass'  代理认证（非回环监听必须）
+#     'proxy_user' / 'proxy_pass'  代理认证（非回环监听必须，设强口令）
 #     'panel_listen': '0.0.0.0:9090'  面板对外开放（非回环强制认证，
 #                                  缺省复用 proxy_user/proxy_pass）
 #   其余（device_name/clientid/cpuid/ras_ip/mac 等）用示例默认值即可跑通。
+#   非交互（SSH 脚本/CI）改键：
+python3 - <<'EOF'
+import re
+kv = {'user': '你的账号', 'password': '你的密码',
+      'devid_seed': 'myhost-motionpro',
+      'deploy_mode': 'container',
+      'proxy_user': 'mp', 'proxy_pass': '强口令',
+      'panel_listen': '0.0.0.0:9090'}
+s = open('config.py', encoding='utf-8').read()
+for k, v in kv.items():
+    s = re.sub("'\\s*%s\\s*':\\s*[^,\\n]+," % k, "'%s': %r," % (k, v), s, count=1)
+open('config.py', 'w', encoding='utf-8').write(s)
+EOF
 
 # 3) 构建并启动（国内网络建议带 PyPI 镜像 build-arg）
 docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 docker compose up -d
-docker logs -f motionpro-proxy     # 看到「隧道就绪 vip=…」即成功
+
+# 4) 等待隧道就绪（脚本可判；人工观察用 docker logs -f motionpro-proxy）
+timeout 90 bash -c 'until docker logs motionpro-proxy 2>&1 | grep -q "隧道就绪"; do sleep 2; done' \
+  && echo "[OK] tunnel up" || docker logs --tail 30 motionpro-proxy
 ```
 
 **端口发布**：`docker-compose.yml` 默认把 1080(SOCKS5)/18081(HTTP)/9090(面板)
 绑到宿主的 Tailscale IP `100.100.129.3`。无 Tailscale 的机器请改 `ports` 段：
 改绑 `0.0.0.0:`（公网 VPS 暴露代理务必保留强认证），或内网 IP / 加防火墙白名单。
+**云服务器**还需在厂商控制台**安全组/防火墙**放行对应入站端口（TCP
+1080/18081/9090；22 供管理）——外部 curl 不通时先用 `ss -tlnp | grep -E
+'1080|18081|9090'` 确认本机在听，再查安全组。
 
 **验证**（宿主本机，凭据换成自己的）：
 
