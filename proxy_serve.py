@@ -156,14 +156,22 @@ class Supervisor:
     def _start_forwarder(self, st):
         if self.fwd:
             self.fwd.stop()
+        self._fwd_gen = getattr(self, '_fwd_gen', 0) + 1
+        gen = self._fwd_gen
         self.fwd = Forwarder(st.tls, self.tun,
                              keepalive_interval=st.keepalive_interval,
-                             on_dead=self._on_dead,
+                             on_dead=lambda why, _g=gen: self._on_dead(why, _g),
                              local_broadcast=broadcast_of(st.vip, st.mask))
         self.fwd.start()
 
     # ---- Forwarder 回调（来自搬运线程） ----
-    def _on_dead(self, why: str):
+    def _on_dead(self, why: str, gen: int = 0):
+        """世代守卫: 被拆除隧道的旧 Forwarder 线程会迟到触发死亡回调
+        (旧 fd 关闭后的 EBADF 等), 不得作用于新隧道。"""
+        if gen != getattr(self, '_fwd_gen', 0):
+            log.info('忽略已拆除隧道的迟到死亡回调(gen=%d != %d): %s',
+                     gen, self._fwd_gen, why)
+            return
         log.warning('tunnel dead: %s → 触发重连', why)
         self._reconnect_evt.set()
 
@@ -214,23 +222,17 @@ class Supervisor:
                 log.error('reconnect attempt %d failed: %s → %ds 后重试',
                           attempt, e, delay)
                 await asyncio.sleep(delay)
-        log.critical('重连 %d 次全部失败, 停止服务', MAX_RECONNECT_ATTEMPTS)
+        log.critical('重连 %d 次全部失败', MAX_RECONNECT_ATTEMPTS)
         self.phase = 'idle'
-        self._stop_evt.set()
+        if not getattr(self, 'panel_endpoint', None):
+            self._stop_evt.set()     # 无面板: 按原行为退出进程
+        # 有面板: 保持面板存活, 用户可在面板重试连接
 
     def _rebuild(self):
-        """重连全套（阻塞, 运行在线程池）: 停搬运 → 回滚路由 → 新会话 → 重配。"""
-        if self.fwd:
-            self.fwd.stop()
-        self.rm.rollback()
-        self.state = self.vpn.reconnect()
-        self.tun.set_ip(self.state.vip, self.state.mask)
-        if hasattr(self.tun, 'add_static_neighbor'):
-            self.tun.add_static_neighbor(fake_gateway_ip(self.state.vip, self.state.mask))
-        self._apply_routes(self.state)
-        if self.cfg.get('vpn_dns_resolve', True):
-            self.resolver = VpnDnsResolver(self.state.dns)
-        self._start_forwarder(self.state)
+        """重连全套（阻塞）: 整体拆除旧隧道（含 TUN/路由/会话）→ 重新 bring_up。
+        不在旧 TUN 上原地重配——实测会 EBUSY; 复用 bring_up 的已验证路径。"""
+        self._tunnel_down_sync()
+        self.bring_up_tunnel()
 
     async def teardown(self):
         log.info('shutting down...')
@@ -241,8 +243,8 @@ class Supervisor:
         self.phase = 'idle'
         log.info('clean exit')
 
-    async def tunnel_down(self):
-        """仅拆隧道（TUN/路由/会话），代理与面板保持运行（面板用）。"""
+    def _tunnel_down_sync(self):
+        """拆隧道（阻塞）: 停搬运 → 回滚路由 → 关 TUN → logout。"""
         if self.fwd:
             self.fwd.stop()
             self.fwd = None
@@ -250,10 +252,14 @@ class Supervisor:
         if self.tun:
             self.tun.close()
             self.tun = None
-        await asyncio.to_thread(self.vpn.shutdown)
+        self.vpn.shutdown()
         self.state = None
         self.resolver = None
         self.connected_since = None
+
+    async def tunnel_down(self):
+        """仅拆隧道（TUN/路由/会话），代理与面板保持运行（面板用）。"""
+        await asyncio.to_thread(self._tunnel_down_sync)
 
     def snapshot(self) -> dict:
         """面板/监控用运行状态快照（只读, 线程安全约读）。"""

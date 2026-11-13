@@ -83,3 +83,28 @@ class TestSupervisorSnapshot(unittest.TestCase):
             pass
         self.assertEqual(sup.phase, 'idle')
         self.assertNotEqual(sup.last_error, '')
+
+
+class TestOnDeadGeneration(unittest.TestCase):
+    """迟到回调世代守卫: 被拆除隧道的旧 Forwarder 不得触发新隧道重连。"""
+
+    def _sup(self):
+        from proxy_serve import Supervisor
+        return Supervisor({'server': 'x.example', 'user': 'u', 'password': 'p'})
+
+    def test_stale_gen_ignored(self):
+        sup = self._sup()
+        sup._fwd_gen = 2
+        sup._on_dead('stale EBADF', gen=1)          # 旧世代
+        self.assertFalse(sup._reconnect_evt.is_set())
+
+    def test_current_gen_triggers(self):
+        sup = self._sup()
+        sup._fwd_gen = 2
+        sup._on_dead('EOF', gen=2)                  # 当前世代
+        self.assertTrue(sup._reconnect_evt.is_set())
+
+    def test_default_gen_zero_matches_fresh(self):
+        sup = self._sup()                            # 未启动过 forwarder → gen 0
+        sup._on_dead('EOF')                          # gen 缺省 0
+        self.assertTrue(sup._reconnect_evt.is_set())

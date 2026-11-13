@@ -8,4 +8,5 @@
 !routes.py
 !local_proxy.py
 !proxy_serve.py
+!web_panel.py
 !config.example.py
