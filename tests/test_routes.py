@@ -182,18 +182,21 @@ class TestContainerMode(unittest.TestCase):
         self.assertEqual(cmds[6],
                          'ip route replace default via 172.18.0.1 dev eth0 table 100')
         self.assertEqual(cmds[7], 'ip rule add pref 100 from 172.18.0.2 lookup 100')
+        # 5) 收尾删除 docker 原 metric-0 默认（0/0 已就位后无裸奔窗口）
+        self.assertEqual(cmds[8], 'ip route del default via 172.18.0.1 dev eth0')
 
     def test_container_rollback_reverses(self):
         rm, fr = self._rm()
         rm.apply_container_full('vpn.example.cn', '111.187.82.10')
         rm.rollback()
-        dels = [' '.join(c) for c in fr.commands[-5:]]
+        dels = [' '.join(c) for c in fr.commands[-6:]]
         self.assertEqual(dels, [
+            'ip route add default via 172.18.0.1 dev eth0',      # 还原 docker 默认
             'ip rule del pref 100 from 172.18.0.2 lookup 100',
             'ip route del default table 100',
             'ip route del default metric 1',
             'ip route del 202.120.190.1/32',
-            'ip route replace default via 172.18.0.1 dev eth0',  # 还原 docker 默认 metric 0
+            'ip route del default via 172.18.0.1 dev eth0 metric 200',
         ])
 
     def test_container_dns_127_skipped(self):

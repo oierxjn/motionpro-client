@@ -292,18 +292,25 @@ class RouteManager:
                  gw_ip, container_ip, container_gw, container_iface, tun_iface_alias)
         # docker eth0 默认路由隐式 metric 0 会压过 metric-1 的 0/0(mptun0)——
         # 内核同前缀取更低 metric, 结果容器流量全部走 eth0 泄漏、隧道形同虚设。
-        # netns 本地操作: 把容器自己的 eth0 默认路由 metric 抬到 200, 0/0 才
-        # 真正生效; 表 100 的 eth0 默认负责 DNAT 回包, 不受影响; rollback 还原。
+        # netns 本地三步: 先加 metric 200 的 eth0 默认（replace 幂等）, 隧道
+        # 0/0 装好后再删 docker 原 metric-0 默认（undo 原样还原）。表 100 的
+        # eth0 默认负责 DNAT 回包, 不受影响。
         self._exec(['ip', 'route', 'replace', 'default', 'via', container_gw,
                     'dev', container_iface, 'metric', '200'],
-                   undo=['ip', 'route', 'replace', 'default', 'via', container_gw,
-                         'dev', container_iface])
+                   undo=['ip', 'route', 'del', 'default', 'via', container_gw,
+                         'dev', container_iface, 'metric', '200'])
         self.add_host_route(gw_ip, gw=container_gw, iface=container_iface, metric=1)
         for dns in self.system_dns_servers():
             log.info('DNS 排除路由: %s → 容器主网卡', dns)
             self.add_host_route(dns, gw=container_gw, iface=container_iface, metric=1)
         self.add_default_route(iface=tun_iface_alias, metric=tun_metric)
         self.add_source_rule_route(container_ip, container_gw, container_iface)
+        # 收尾删除 docker 原 metric-0 默认: 此时 0/0(mptun0, metric 1) 已就位,
+        # 无裸奔窗口; 删除后隧道默认路由才是唯一最优
+        self._exec(['ip', 'route', 'del', 'default', 'via', container_gw,
+                    'dev', container_iface],
+                   undo=['ip', 'route', 'add', 'default', 'via', container_gw,
+                         'dev', container_iface])
         return gw_ip, container_gw, container_ip
 
     def rollback(self):
