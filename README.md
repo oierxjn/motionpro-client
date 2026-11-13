@@ -100,8 +100,9 @@ curl -fsSL https://get.docker.com | sh     # 官方源 docker-ce + compose 插�
 
 ```bash
 # 1) 克隆仓库（构建上下文需要全部源码，不能只拷 Dockerfile）
-#    大陆网络对 GitHub 时通时断：失败就重试 2-3 次
-git clone https://github.com/oierxjn/motionpro-client.git
+#    --depth 1 只取最新提交，部署够用且对大陆网络更稳；失败就重试 2-3 次
+#    （以后想参与开发再 git fetch --unshallow 补全历史）
+git clone --depth 1 https://github.com/oierxjn/motionpro-client.git
 cd motionpro-client
 
 # 2) 写配置（含凭据，.gitignore 已排除、不会被提交）
