@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
     && rm -rf /var/lib/apt/lists/*
 
 COPY mp_client.py proto_client.py vpn_service.py forwarder.py \
-     tun_dev.py routes.py local_proxy.py proxy_serve.py \
+     tun_dev.py routes.py local_proxy.py proxy_serve.py web_panel.py \
      config.example.py ./
 
 # config.py 由运行时挂载（含凭据，不入镜像）
