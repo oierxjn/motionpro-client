@@ -4,9 +4,10 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# 运行时依赖: cryptography + iproute2(tun_dev 用 ip 命令配 TUN/路由)
+# 运行时依赖: cryptography(隧道) + fastapi/uvicorn(Web 面板) + iproute2(tun_dev 用 ip 命令)
 ARG PIP_INDEX_URL=https://pypi.org/simple
-RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} "cryptography>=50.0.1" \
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
+        "cryptography>=50.0.1" "fastapi" "uvicorn" \
     && apt-get update \
     && apt-get install -y --no-install-recommends iproute2 \
     && rm -rf /var/lib/apt/lists/*

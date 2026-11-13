@@ -64,7 +64,13 @@ def build_listeners(cfg: dict) -> list:
 
 
 class Supervisor:
-    """组件装配 + 重连编排 + 清理。"""
+    """组件装配 + 重连编排 + 清理。
+
+    phase 状态机（供面板/外部控制只读）:
+        idle → connecting → up ⇄ reconnecting → up
+              ↑______stopping ←______|
+    隧道的连接/断开可在运行期通过 bg_connect()/tunnel_down() 控制，
+    代理监听与（可选）Web 面板独立于隧道存活。"""
 
     def __init__(self, cfg: dict):
         self.cfg = dict(cfg)
@@ -76,39 +82,53 @@ class Supervisor:
         self.state = None
         self.bind_ip = ''               # 上游绑定源 IP（split 模式自动=VIP）
         self.resolver = None            # 隧道 DNS 解析器（重连后刷新）
+        self.phase = 'idle'
+        self.last_error = ''
+        self.connected_since = None     # monotonic（断开/重连时重置）
         self._stop_evt = threading.Event()
         self._reconnect_evt = threading.Event()
 
     # ---- 启动（阻塞部分, 在 asyncio 循环外调用） ----
     def bring_up_tunnel(self):
-        """隧道 → TUN → 路由 → 搬运。"""
-        self.state = self.vpn.connect()
-        st = self.state
-        self.tun = create_tun(self.cfg.get('tun_kind') or None)
-        self.tun.open(self.cfg.get('tun_name', 'mptun0'),
-                      int(self.cfg.get('tun_mtu', 1400)))
-        self.tun.set_ip(st.vip, st.mask)
-        if hasattr(self.tun, 'add_static_neighbor'):
-            # 0/0 下一跳(假网关)挂永久 ARP 条目, 否则内核 ARP 无应答 → 单播黑洞
-            self.tun.add_static_neighbor(fake_gateway_ip(st.vip, st.mask))
-        self._apply_routes(st)
-        if self.cfg.get('route_mode', 'full') == 'split' or \
-                self.cfg.get('deploy_mode', 'host') == 'container':
-            # split: 出口流量必须以 VIP 为源才能命中分段路由;
-            # container: 上游绑定 VIP 为源, 与容器 eth0 IP 的回包按源地址分流
-            self.bind_ip = st.vip
-            log.info('上游自动绑定 VIP %s', st.vip)
-        else:
-            self.bind_ip = str(self.cfg.get('proxy_bind_ip', '') or '')
-        if self.cfg.get('vpn_dns_resolve', True):
-            # 用隧道 DNS 解析域名: 校园边界对 VPN 池单向 NAT, 公网解析的
-            # 地址回包源不匹配; 网关自己的 DNS 给内网地址才能连通(官方同款)
-            self.resolver = VpnDnsResolver(st.dns,
-                                           timeout=float(self.cfg.get('vpn_dns_timeout', 8)))
-            log.info('域名解析走隧道 DNS %s (timeout=%ss)',
-                     st.dns, self.cfg.get('vpn_dns_timeout', 8))
-        self._start_forwarder(st)
-        return st
+        """隧道 → TUN → 路由 → 搬运。失败时 phase 回到 idle 并记录 last_error。"""
+        self.phase = 'connecting'
+        self.last_error = ''
+        try:
+            self.state = self.vpn.connect()
+            st = self.state
+            if self.tun is None:
+                self.tun = create_tun(self.cfg.get('tun_kind') or None)
+                self.tun.open(self.cfg.get('tun_name', 'mptun0'),
+                              int(self.cfg.get('tun_mtu', 1400)))
+            self.tun.set_ip(st.vip, st.mask)
+            if hasattr(self.tun, 'add_static_neighbor'):
+                # 0/0 下一跳(假网关)挂永久 ARP 条目, 否则内核 ARP 无应答 → 单播黑洞
+                self.tun.add_static_neighbor(fake_gateway_ip(st.vip, st.mask))
+            self._apply_routes(st)
+            if self.cfg.get('route_mode', 'full') == 'split' or \
+                    self.cfg.get('deploy_mode', 'host') == 'container':
+                # split: 出口流量必须以 VIP 为源才能命中分段路由;
+                # container: 上游绑定 VIP 为源, 与容器 eth0 IP 的回包按源地址分流
+                self.bind_ip = st.vip
+                log.info('上游自动绑定 VIP %s', st.vip)
+            else:
+                self.bind_ip = str(self.cfg.get('proxy_bind_ip', '') or '')
+            if self.cfg.get('vpn_dns_resolve', True):
+                # 用隧道 DNS 解析域名: 校园边界对 VPN 池单向 NAT, 公网解析的
+                # 地址回包源不匹配; 网关自己的 DNS 给内网地址才能连通(官方同款)
+                self.resolver = VpnDnsResolver(st.dns,
+                                               timeout=float(self.cfg.get('vpn_dns_timeout', 8)))
+                log.info('域名解析走隧道 DNS %s (timeout=%ss)',
+                         st.dns, self.cfg.get('vpn_dns_timeout', 8))
+            self._start_forwarder(st)
+            import time as _time
+            self.connected_since = _time.monotonic()
+            self.phase = 'up'
+            return st
+        except Exception as e:
+            self.last_error = '%s: %s' % (type(e).__name__, e)
+            self.phase = 'idle'
+            raise
 
     def _apply_routes(self, st):
         alias = getattr(self.tun, 'alias', None) or self.tun.name
@@ -171,23 +191,31 @@ class Supervisor:
                     break
                 if self._reconnect_evt.is_set():
                     self._reconnect_evt.clear()
-                    await self._do_reconnect()
+                    if self.phase == 'up':
+                        await self._do_reconnect()
+                    # phase 非 up(如面板已手动断开)时丢弃事件, 不自动重连
                 await asyncio.sleep(0.5)
         finally:
             await self.teardown()
 
     async def _do_reconnect(self):
+        self.phase = 'reconnecting'
         for attempt in range(1, MAX_RECONNECT_ATTEMPTS + 1):
             try:
                 await asyncio.to_thread(self._rebuild)
                 log.info('reconnect ok (attempt %d)', attempt)
+                self.phase = 'up'
+                import time as _time
+                self.connected_since = _time.monotonic()
                 return
             except Exception as e:
                 delay = min(60, 2 ** attempt)
+                self.last_error = '%s: %s' % (type(e).__name__, e)
                 log.error('reconnect attempt %d failed: %s → %ds 后重试',
                           attempt, e, delay)
                 await asyncio.sleep(delay)
         log.critical('重连 %d 次全部失败, 停止服务', MAX_RECONNECT_ATTEMPTS)
+        self.phase = 'idle'
         self._stop_evt.set()
 
     def _rebuild(self):
@@ -206,15 +234,64 @@ class Supervisor:
 
     async def teardown(self):
         log.info('shutting down...')
-        if self.fwd:
-            self.fwd.stop()
+        self.phase = 'stopping'
+        await self.tunnel_down()
         if self.proxy:
             await self.proxy.stop()
+        self.phase = 'idle'
+        log.info('clean exit')
+
+    async def tunnel_down(self):
+        """仅拆隧道（TUN/路由/会话），代理与面板保持运行（面板用）。"""
+        if self.fwd:
+            self.fwd.stop()
+            self.fwd = None
         self.rm.rollback()
         if self.tun:
             self.tun.close()
+            self.tun = None
         await asyncio.to_thread(self.vpn.shutdown)
-        log.info('clean exit')
+        self.state = None
+        self.resolver = None
+        self.connected_since = None
+
+    def snapshot(self) -> dict:
+        """面板/监控用运行状态快照（只读, 线程安全约读）。"""
+        import time as _time
+        st = self.state
+        snap = {
+            'phase': self.phase,
+            'last_error': self.last_error,
+            'uptime_sec': (int(_time.monotonic() - self.connected_since)
+                           if self.connected_since else None),
+            'deploy_mode': self.cfg.get('deploy_mode', 'host'),
+            'route_mode': self.cfg.get('route_mode', 'full'),
+            'proxy_endpoints': [('%s:%d' % ep) for ep in self.proxy.endpoints]
+                               if self.proxy else [],
+            'panel': self.panel_endpoint if hasattr(self, 'panel_endpoint') else '',
+        }
+        if st:
+            snap.update(vip=st.vip, mask=st.mask, dns=st.dns,
+                        keepalive_interval=st.keepalive_interval,
+                        mptoken=st.mptoken)
+        else:
+            snap.update(vip=None, mask=None, dns=[], keepalive_interval=None,
+                        mptoken=None)
+        snap['forwarder'] = dict(self.fwd.stats) if self.fwd else None
+        return snap
+
+    async def bg_connect(self):
+        """面板「连接」按钮：后台线程建隧道，完成/失败更新 phase。"""
+        if self.phase != 'idle':
+            return
+        task = asyncio.create_task(asyncio.to_thread(self.bring_up_tunnel))
+
+        def _done(t: asyncio.Task):
+            try:
+                t.result()      # bring_up_tunnel 已自行管理 phase/last_error
+            except Exception:
+                pass
+        task.add_done_callback(_done)
 
     def request_stop(self):
         self._stop_evt.set()
@@ -237,6 +314,8 @@ def main():
                     help='路由命令只打印不执行（调试）')
     ap.add_argument('--run-for', type=float, default=0, metavar='SECONDS',
                     help='运行 N 秒后优雅自停（0=一直运行; 供测试/受控部署）')
+    ap.add_argument('--no-panel', action='store_true',
+                    help='禁用 Web 控制面板')
     args = ap.parse_args()
 
     setup_logging(CFG.get('log_file', ''))
@@ -253,13 +332,54 @@ def main():
     sup = Supervisor(CFG)
     if args.route_dry_run:
         sup.cfg['route_dry_run'] = True
-    sup.bring_up_tunnel()
-    print('[*] 隧道就绪 vip=%s/%s' % (sup.state.vip, sup.state.mask))
+
+    panel_listen = '' if args.no_panel else \
+        str(CFG.get('panel_listen', '127.0.0.1:9090') or '')
     try:
-        # Ctrl+C → run() 的 finally 负责全部清理, asyncio.run 返回即清理完毕
-        asyncio.run(sup.run(run_for=args.run_for))
+        if panel_listen:
+            serve_with_panel(sup, panel_listen, args.run_for)
+        else:
+            sup.bring_up_tunnel()
+            print('[*] 隧道就绪 vip=%s/%s' % (sup.state.vip, sup.state.mask))
+            asyncio.run(sup.run(run_for=args.run_for))
     except KeyboardInterrupt:
         pass
+
+
+def serve_with_panel(sup, listen: str, run_for: float):
+    """面板优先启动（隧道失败/断开时面板仍可用），随后后台建隧道。"""
+    import uvicorn
+    from web_panel import create_app, panel_auth
+
+    host, port = _parse_listen(listen, '127.0.0.1')
+    auth = panel_auth(sup.cfg, host)
+    sup.panel_endpoint = '%s:%d' % (host, port)
+    app, _ring = create_app(sup, auth=auth)
+    loopback = host in ('127.0.0.1', '::1', 'localhost')
+    log.info('Web 面板: http://%s:%d %s', host, port,
+             '(回环, 免认证)' if loopback else '(已启用 Basic 认证)')
+
+    config = uvicorn.Config(app, host=host, port=port,
+                            log_level='warning', access_log=False)
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None   # 让 Supervisor 接管信号
+
+    async def _serve():
+        panel_task = asyncio.create_task(server.serve())
+        try:
+            await asyncio.to_thread(sup.bring_up_tunnel)
+            print('[*] 隧道就绪 vip=%s/%s' % (sup.state.vip, sup.state.mask))
+        except Exception as e:
+            # 建隧道失败不退出: 面板保持可用, 可点「连接」重试
+            log.error('隧道建立失败: %s (面板保持可用, 可重试连接)', e)
+        await sup.run(run_for=run_for)
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(panel_task, timeout=5)
+        except Exception:
+            pass
+
+    asyncio.run(_serve())
 
 
 if __name__ == '__main__':

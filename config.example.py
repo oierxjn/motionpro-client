@@ -60,6 +60,12 @@ CFG = {
     'vpn_dns_resolve': True,
     'vpn_dns_timeout': 8,          # 隧道 DNS 单次查询超时(秒)
 
+    # Web 控制面板（状态/启停/日志）; 置空 '' 可禁用。
+    # 非回环监听强制认证（panel_user/panel_pass, 缺省复用 proxy_user/proxy_pass）
+    'panel_listen':   '127.0.0.1:9090',
+    'panel_user':     '',
+    'panel_pass':     '',
+
     # 日志文件（空=仅控制台输出）
     'log_file':       '',
 }

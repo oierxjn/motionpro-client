@@ -18,6 +18,7 @@ services:
     ports:
       - "100.100.129.3:1080:1080"    # SOCKS5 ← 绑定 Tailscale IP（宿主 8080 被 casaos 占用, HTTP 换 18081）
       - "100.100.129.3:18081:8080"   # HTTP
+      - "100.100.129.3:9090:9090"    # Web 控制面板（config.py 里 panel_listen: 0.0.0.0:9090）
     volumes:
       - ./config.py:/app/config.py:ro
     logging:
