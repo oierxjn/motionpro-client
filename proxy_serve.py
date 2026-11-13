@@ -120,6 +120,12 @@ class Supervisor:
                                                timeout=float(self.cfg.get('vpn_dns_timeout', 8)))
                 log.info('域名解析走隧道 DNS %s (timeout=%ss)',
                          st.dns, self.cfg.get('vpn_dns_timeout', 8))
+            if self.proxy is not None:
+                # 面板重连后 VIP 会变: 代理按「每条连接」读取这两个属性, 这里
+                # 同步刷新, 否则上游 socket 仍绑旧 VIP → Cannot assign requested
+                # address, 代理在重连后全部 502/拒绝
+                self.proxy.bind_ip = self.bind_ip
+                self.proxy.resolver = self.resolver
             self._start_forwarder(st)
             import time as _time
             self.connected_since = _time.monotonic()

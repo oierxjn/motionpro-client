@@ -108,6 +108,23 @@ class TestSupervisorSnapshot(unittest.TestCase):
         self.assertIsNone(sup.tun)
         self.assertIsNone(sup.state)            # 快照不再显示陈旧 VIP
 
+    def test_bring_up_refreshes_live_proxy_binding(self):
+        """重连后 VIP 变化: 运行中的代理必须拿到新 bind_ip/resolver,
+        否则上游 socket 绑旧 VIP → Cannot assign requested address。"""
+        from proxy_serve import Supervisor
+        sup = Supervisor({'server': 'x.example', 'user': 'u', 'password': 'p',
+                          'deploy_mode': 'container'})
+        st = SimpleNamespace(vip='10.7.0.9', mask='255.255.255.0', dns=['1.1.1.1'],
+                             keepalive_interval=30, mptoken=1, tls=None)
+        sup.vpn = SimpleNamespace(connect=lambda: st, shutdown=lambda: None)
+        sup.tun = SimpleNamespace(set_ip=lambda ip, m: None, close=lambda: None)
+        sup._apply_routes = lambda _st: None
+        sup._start_forwarder = lambda _st: None
+        sup.proxy = SimpleNamespace(bind_ip='10.7.0.1', resolver='old-resolver')
+        sup.bring_up_tunnel()
+        self.assertEqual(sup.proxy.bind_ip, '10.7.0.9')
+        self.assertIsNotNone(sup.proxy.resolver)
+
 
 class TestOnDeadGeneration(unittest.TestCase):
     """迟到回调世代守卫: 被拆除隧道的旧 Forwarder 不得触发新隧道重连。"""
