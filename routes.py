@@ -290,6 +290,14 @@ class RouteManager:
         container_ip = self.primary_addr(container_iface)
         log.info('apply_container_full: gw=%s container(%s, %s, %s) → tun=%s',
                  gw_ip, container_ip, container_gw, container_iface, tun_iface_alias)
+        # docker eth0 默认路由隐式 metric 0 会压过 metric-1 的 0/0(mptun0)——
+        # 内核同前缀取更低 metric, 结果容器流量全部走 eth0 泄漏、隧道形同虚设。
+        # netns 本地操作: 把容器自己的 eth0 默认路由 metric 抬到 200, 0/0 才
+        # 真正生效; 表 100 的 eth0 默认负责 DNAT 回包, 不受影响; rollback 还原。
+        self._exec(['ip', 'route', 'replace', 'default', 'via', container_gw,
+                    'dev', container_iface, 'metric', '200'],
+                   undo=['ip', 'route', 'replace', 'default', 'via', container_gw,
+                         'dev', container_iface])
         self.add_host_route(gw_ip, gw=container_gw, iface=container_iface, metric=1)
         for dns in self.system_dns_servers():
             log.info('DNS 排除路由: %s → 容器主网卡', dns)

@@ -170,26 +170,30 @@ class TestContainerMode(unittest.TestCase):
         self.assertEqual(gw_ip, '202.120.190.1')
         self.assertEqual((cgw, cip), ('172.18.0.1', '172.18.0.2'))
         cmds = [' '.join(c) for c in fr.commands]
-        # 1) 防环: AG 网关 /32 走容器主网卡（容器内无可用 DNS 排除项, cmds[3] 是 DNS 查询）
+        # 1) 抬高 docker eth0 默认路由 metric (否则压过隧道 0/0, 流量走 eth0 泄漏)
         self.assertEqual(cmds[2],
+                         'ip route replace default via 172.18.0.1 dev eth0 metric 200')
+        # 2) 防环: AG 网关 /32 走容器主网卡（容器内无可用 DNS 排除项, cmds[4] 是 DNS 查询）
+        self.assertEqual(cmds[3],
                          'ip route replace 202.120.190.1/32 via 172.18.0.1 dev eth0')
-        # 2) 0/0 → 容器内 TUN (netns 本地, 不碰宿主; replace 幂等, 失败重试可重复装配)
-        self.assertEqual(cmds[4], 'ip route replace default metric 1 dev mptun0')
-        # 3) 源地址分流: 容器 IP 回包 → 独立表走主网卡
-        self.assertEqual(cmds[5],
+        # 3) 0/0 → 容器内 TUN (netns 本地, 不碰宿主; replace 幂等, 失败重试可重复装配)
+        self.assertEqual(cmds[5], 'ip route replace default metric 1 dev mptun0')
+        # 4) 源地址分流: 容器 IP 回包 → 独立表走主网卡
+        self.assertEqual(cmds[6],
                          'ip route replace default via 172.18.0.1 dev eth0 table 100')
-        self.assertEqual(cmds[6], 'ip rule add pref 100 from 172.18.0.2 lookup 100')
+        self.assertEqual(cmds[7], 'ip rule add pref 100 from 172.18.0.2 lookup 100')
 
     def test_container_rollback_reverses(self):
         rm, fr = self._rm()
         rm.apply_container_full('vpn.example.cn', '111.187.82.10')
         rm.rollback()
-        dels = [' '.join(c) for c in fr.commands[-4:]]
+        dels = [' '.join(c) for c in fr.commands[-5:]]
         self.assertEqual(dels, [
             'ip rule del pref 100 from 172.18.0.2 lookup 100',
             'ip route del default table 100',
             'ip route del default metric 1',
             'ip route del 202.120.190.1/32',
+            'ip route replace default via 172.18.0.1 dev eth0',  # 还原 docker 默认 metric 0
         ])
 
     def test_container_dns_127_skipped(self):
