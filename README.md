@@ -12,6 +12,7 @@ Array Networks **MotionPro VPN（AG 网关）** 的开源协议复现客户端�
 | `mp_client.py` | 主客户端：自研 TLS1.2（vpnd 指纹）+ 控制面 + L3 裸 IP 数据面 |
 | `vpn_service.py` | `VpnService`：隧道会话服务类（connect/reconnect/shutdown） |
 | `proxy_serve.py` | **代理服务端入口**：SOCKS5/HTTP 代理 → TUN → VPN 隧道 |
+| `web_panel.py` | Web 控制面板（FastAPI：状态/连接/断开/日志，内嵌单页 UI） |
 | `local_proxy.py` | 内建 asyncio 代理组件（SOCKS5 RFC1928 + HTTP/CONNECT，可独立运行/替换） |
 | `forwarder.py` | 隧道 ↔ TUN 双线程 IP 包搬运 + keepalive + 帧解复用（`FrameDemuxer`） |
 | `tun_dev.py` | TUN 设备封装（Windows wintun / Linux /dev/net/tun 双实现） |
@@ -83,25 +84,75 @@ uv run proxy_serve.py
   192.168.80.100:80）；部分端口（内网 :443、公网出口）能否使用取决于网关
   与目标策略，与本客户端无关。
 
-### 容器部署（多服务主机推荐）
+### 容器部署（多服务主机 / 云服务器推荐）
 
-在跑着其他服务的主机上用容器隔离部署——TUN/路由/0/0 全部作用于容器 netns，
-**宿主路由表零改动**（对外服务/其他容器/Tailscale 均无感知）：
+在跑着其他服务的主机上用容器隔离部署——TUN/路由全部作用于容器 netns，
+**宿主路由表零改动**（对外服务/其他容器/Tailscale 均无感知）。
+
+前置：宿主有 `/dev/net/tun`（内核 tun 模块，通常默认）、`git` 与 Docker
+（含 compose 插件）。Debian/Ubuntu 缺什么装什么：
 
 ```bash
-mkdir -p ~/motionpro-deploy && cd ~/motionpro-deploy
-# 放入 config.py（从 config.example.py 复制, 设 'deploy_mode': 'container'）
-#   与 docker-compose.yml（端口按需改绑, 默认只发布到 Tailscale IP）
-curl -LO https://raw.githubusercontent.com/oierxjn/motionpro-client/main/Dockerfile
-docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-docker compose up -d && docker logs -f motionpro-proxy
+apt-get update && apt-get install -y git docker.io docker-compose
 ```
 
-原理：容器内 `default metric 1 dev mptun0` 只作用于容器 netns；「DNAT 进入的
-代理客户端回包」（源=容器 eth0 IP）由源地址策略路由（`ip rule from <eth0_ip>
-lookup 100`）钉在 docker 网关上，与绑定 VIP 为源的上游流量天然分流。
-注意：宿主 resolv.conf 若指向 Tailscale MagicDNS（100.100.100.100），其对部分
-域名可能返回空答案，compose 已给容器显式配公共 DNS。
+```bash
+# 1) 克隆仓库（构建上下文需要全部源码，不能只拷 Dockerfile）
+git clone https://github.com/oierxjn/motionpro-client.git
+cd motionpro-client
+
+# 2) 写配置（含凭据，.gitignore 已排除、不会被提交）
+cp config.example.py config.py && vim config.py
+#   最少修改这几项：
+#     'user' / 'password'          登录凭据
+#     'devid_seed'                 换成任意稳定字符串
+#     'deploy_mode': 'container'   容器模式（关键）
+#     'proxy_user' / 'proxy_pass'  代理认证（非回环监听必须）
+#     'panel_listen': '0.0.0.0:9090'  面板对外开放（非回环强制认证，
+#                                  缺省复用 proxy_user/proxy_pass）
+#   其余（device_name/clientid/cpuid/ras_ip/mac 等）用示例默认值即可跑通。
+
+# 3) 构建并启动（国内网络建议带 PyPI 镜像 build-arg）
+docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+docker compose up -d
+docker logs -f motionpro-proxy     # 看到「隧道就绪 vip=…」即成功
+```
+
+**端口发布**：`docker-compose.yml` 默认把 1080(SOCKS5)/18081(HTTP)/9090(面板)
+绑到宿主的 Tailscale IP `100.100.129.3`。无 Tailscale 的机器请改 `ports` 段：
+改绑 `0.0.0.0:`（公网 VPS 暴露代理务必保留强认证），或内网 IP / 加防火墙白名单。
+
+**验证**（宿主本机，凭据换成自己的）：
+
+```bash
+curl -x socks5h://USER:PASS@127.0.0.1:1080 -I http://www.tongji.edu.cn    # → 200
+curl -x http://USER:PASS@127.0.0.1:18081 -I http://www.tongji.edu.cn      # → 200
+curl -s -u USER:PASS http://127.0.0.1:9090/api/status                     # 面板 API
+```
+
+**面板**：浏览器开 `http://<宿主IP>:9090`（Basic 认证 = `panel_user/panel_pass`
+或缺省 `proxy_user/proxy_pass`）：实时状态/转发统计/日志，连接/断开/重连按钮；
+对应 API 为 `/api/status|logs|connect|disconnect|reconnect`。
+
+**运维注意**（实测沉淀）：
+
+- 断开→连接可反复循环；拆隧道会把容器路由精确还原为 docker 原状，
+  `docker compose down` 后 netns 内不留任何路由/TUN 残留。
+- 同一账号频繁重建会话易触发网关限流（数据面变差，控制面正常，冷却数小时
+  自愈）。面板手动重试没问题，勿写高频自动重建脚本。
+- **校内部署连不上属正常**：校园网部分网段会阻断 vpn.tongji.cn（校内本来
+  就不需要 VPN），请在公网/居家环境部署。
+- 该部署是「校园公网出口」型：经隧道可访问公网（源 IP = 校园 VIP，可获得
+  校园 IP 身份的 web 资源）与**网关放行的**特定校园资源；任意校内内网段
+  （10/8、192.168.x 等）默认不可达，取决于网关发布策略。
+- 宿主 resolv.conf 若指向 Tailscale MagicDNS（100.100.100.100），其对部分
+  域名可能返回空答案——compose 已给容器显式配公共 DNS（223.5.5.5 等），
+  无需处理。
+
+原理：容器内 `default metric 1 dev mptun0` 只作用于容器 netns（装配时自动
+把 docker 的 metric-0 默认路由让位）；「DNAT 进入的代理客户端回包」（源=容器
+eth0 IP）由源地址策略路由（`ip rule from <eth0_ip> lookup 100`）钉在 docker
+网关上，与绑定 VIP 为源的上游流量天然分流。
 
 ### 模块解耦约定
 
