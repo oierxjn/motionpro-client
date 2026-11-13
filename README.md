@@ -100,6 +100,7 @@ curl -fsSL https://get.docker.com | sh     # 官方源 docker-ce + compose 插�
 
 ```bash
 # 1) 克隆仓库（构建上下文需要全部源码，不能只拷 Dockerfile）
+#    大陆网络对 GitHub 时通时断：失败就重试 2-3 次
 git clone https://github.com/oierxjn/motionpro-client.git
 cd motionpro-client
 
@@ -107,14 +108,16 @@ cd motionpro-client
 cp config.example.py config.py
 #   交互式：vim config.py，最少修改：
 #     'user' / 'password'          登录凭据
-#     'devid_seed'                 稳定且可区分设备的字符串（如含主机名）；
-#                                  同账号多台机器务必不同，否则网关视为
-#                                  同一设备，可能互相顶下线
+#     'devid_seed'                 稳定且可区分设备的字符串（如含主机名）。
+#                                  注意：实测该网关同账号只允许一个在线会话，
+#                                  换 seed 也不能两台同时在线，多台部署需先
+#                                  停掉另一台
 #     'deploy_mode': 'container'   容器模式（关键）
 #     'proxy_user' / 'proxy_pass'  代理认证（非回环监听必须，设强口令）
 #     'panel_listen': '0.0.0.0:9090'  面板对外开放（非回环强制认证，
 #                                  缺省复用 proxy_user/proxy_pass）
-#   其余（device_name/clientid/cpuid/ras_ip/mac 等）用示例默认值即可跑通。
+#   其余（device_name/clientid/ras_ip/mac 等）建议照真实环境填写（示例
+#   占位符未实测保证可用）。
 #   非交互（SSH 脚本/CI）改键：
 python3 - <<'EOF'
 import re
@@ -125,7 +128,7 @@ kv = {'user': '你的账号', 'password': '你的密码',
       'panel_listen': '0.0.0.0:9090'}
 s = open('config.py', encoding='utf-8').read()
 for k, v in kv.items():
-    s = re.sub("'\\s*%s\\s*':\\s*[^,\\n]+," % k, "'%s': %r," % (k, v), s, count=1)
+    s = re.sub(r"'\s*%s\s*':\s*[^,\n]+," % k, "'%s': %r," % (k, v), s, count=1)
 open('config.py', 'w', encoding='utf-8').write(s)
 EOF
 
@@ -133,14 +136,18 @@ EOF
 docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 docker compose up -d
 
-# 4) 等待隧道就绪（脚本可判；人工观察用 docker logs -f motionpro-proxy）
-timeout 90 bash -c 'until docker logs motionpro-proxy 2>&1 | grep -q "隧道就绪"; do sleep 2; done' \
-  && echo "[OK] tunnel up" || docker logs --tail 30 motionpro-proxy
+# 4) 等待隧道就绪（人工观察用 docker logs -f motionpro-proxy）。
+#    注意「隧道就绪 / tunnel up」日志在每次重连成功都会打印，会话被踢的
+#    振荡场景下照样出现——最终以面板 API 的 phase 为准：
+timeout 90 bash -c 'until docker logs motionpro-proxy 2>&1 | grep -qE "隧道就绪|tunnel up: vip="; do sleep 2; done'
+curl -s -u USER:PASS http://127.0.0.1:9090/api/status | grep -o '"phase":"[a-z]*"'
+#    phase 应为 "up" 且 uptime_sec 持续增长；若为 "idle" 用上面的日志排查
 ```
 
 **端口发布**：`docker-compose.yml` 默认把 1080(SOCKS5)/18081(HTTP)/9090(面板)
-绑到宿主的 Tailscale IP `100.100.129.3`。无 Tailscale 的机器请改 `ports` 段：
-改绑 `0.0.0.0:`（公网 VPS 暴露代理务必保留强认证），或内网 IP / 加防火墙白名单。
+绑到宿主的 Tailscale IP `100.100.129.3`。无 Tailscale 的机器一条命令改绑全端口：
+`sed -i 's/100\.100\.129\.3:/0.0.0.0:/g' docker-compose.yml`
+（公网 VPS 暴露代理务必保留强认证；也可改绑内网 IP / 加防火墙白名单）。
 **云服务器**还需在厂商控制台**安全组/防火墙**放行对应入站端口（TCP
 1080/18081/9090；22 供管理）——外部 curl 不通时先用 `ss -tlnp | grep -E
 '1080|18081|9090'` 确认本机在听，再查安全组。
@@ -151,6 +158,11 @@ timeout 90 bash -c 'until docker logs motionpro-proxy 2>&1 | grep -q "隧道就�
 curl -x socks5h://USER:PASS@127.0.0.1:1080 -I http://www.tongji.edu.cn    # → 200
 curl -x http://USER:PASS@127.0.0.1:18081 -I http://www.tongji.edu.cn      # → 200
 curl -s -u USER:PASS http://127.0.0.1:9090/api/status                     # 面板 API
+
+# 出口 IP 判别（关键）：200 只证明代理链路通，不证明流量走了隧道——
+# www.tongji.edu.cn 公网也可达，隧道挂掉后代理走宿主直连出口照样 200。
+# 走隧道时出口应是校园网段地址；若显示宿主自己的公网 IP 说明隧道未生效：
+curl -x socks5h://USER:PASS@127.0.0.1:1080 http://myip.ipip.net
 ```
 
 **面板**：浏览器开 `http://<宿主IP>:9090`（Basic 认证 = `panel_user/panel_pass`
@@ -163,6 +175,11 @@ curl -s -u USER:PASS http://127.0.0.1:9090/api/status                     # 面�
   `docker compose down` 后 netns 内不留任何路由/TUN 残留。
 - 同一账号频繁重建会话易触发网关限流（数据面变差，控制面正常，冷却数小时
   自愈）。面板手动重试没问题，勿写高频自动重建脚本。
+- **同账号只允许一个在线会话（实测）**：第二台机器上线会和第一台互踢（换
+  `devid_seed` 也无法共存），反复拉锯后网关会以 `302 Redirect` 拒绝登录。
+  此时的"假健康"状态：容器仍 Up、代理端口照常监听，但面板 `phase=idle`、
+  `last_error` 含 302。恢复：先停掉另一台，冷却几分钟到几小时，再面板点
+  连接或 `docker compose restart`。
 - **校内部署连不上属正常**：校园网部分网段会阻断 vpn.tongji.cn（校内本来
   就不需要 VPN），请在公网/居家环境部署。
 - 该部署是「校园公网出口」型：经隧道可访问公网（源 IP = 校园 VIP，可获得
